@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>A股量化分析系统</title>
+    <title>分析系统</title>
     <!-- 引入必要的CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
@@ -24,13 +24,15 @@
         let priceHistory = []; // 存储历史价格数据
         let lastAlertTime = 0;
         let titleBlinkInterval = null;
-        let originalTitle = document.title;
+        let originalTitle = "分析系统";
+        let currentPrice = null; // 添加当前价格变量
 
         // DOM加载完成后初始化
         document.addEventListener('DOMContentLoaded', function () {
             initTheme();
             initEventListeners();
             updateHistorySelect();
+            document.title = originalTitle; // 设置默认标题
         });
 
         // 初始化主题
@@ -157,6 +159,8 @@
             const code = document.getElementById('stockCode').value.trim();
             if (!code) {
                 alert('请输入股票代码');
+                currentPrice = null; // 清除当前价格
+                updateTitle(); // 更新标题为默认
                 return;
             }
 
@@ -224,10 +228,25 @@
                 document.getElementById('support').textContent = data.support;
                 document.getElementById('resistance').textContent = data.resistance;
 
+                // 更新当前价格并更新标题
+                currentPrice = data.price;
+                updateTitle();
+
                 updateSignalDisplay(data);
             } catch (error) {
                 console.error('更新股票信息出错:', error);
                 alert('更新股票信息失败：' + error.message);
+            }
+        }
+
+        // 更新标题
+        function updateTitle() {
+            if (!titleBlinkInterval) { // 如果没有提醒在闪烁
+                if (currentPrice) {
+                    document.title = currentPrice.toFixed(2);
+                } else {
+                    document.title = originalTitle;
+                }
             }
         }
 
@@ -472,14 +491,15 @@
             // 开始标题闪烁
             let isOriginal = true;
             titleBlinkInterval = setInterval(() => {
-                document.title = isOriginal ? `⚠️ ${message}` : originalTitle;
+                document.title = isOriginal ? `${message}` : (currentPrice ? currentPrice.toFixed(2) : originalTitle);
                 isOriginal = !isOriginal;
             }, 1000);
 
             // 3秒后停止闪烁
             setTimeout(() => {
                 clearInterval(titleBlinkInterval);
-                document.title = originalTitle;
+                titleBlinkInterval = null;
+                updateTitle();
             }, 3000);
         }
 
