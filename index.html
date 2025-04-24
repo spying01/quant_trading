@@ -37,6 +37,10 @@
             document.title = originalTitle; // 设置默认标题
             // 初始化提醒音效
             alertSound = new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU...');
+            // 请求通知权限
+            if (Notification.permission !== "granted") {
+                Notification.requestPermission();
+            }
         });
 
         // 初始化主题
@@ -494,11 +498,15 @@
 
         // 显示提醒
         function showAlert(message) {
-            // 播放提醒音效
-            if (alertSound) {
-                alertSound.play().catch(error => {
-                    console.error('播放提醒音效失败:', error);
+            // 播放系统提示音
+            try {
+                new Notification("交易提醒", {
+                    body: message,
+                    icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230ea5e9'%3E%3Cpath d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z'/%3E%3C/svg%3E",
+                    silent: false // 使用系统默认提示音
                 });
+            } catch (error) {
+                console.error('显示通知失败:', error);
             }
 
             // 开始标题闪烁
