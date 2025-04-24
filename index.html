@@ -186,6 +186,9 @@
                 }
 
                 await updateStockData();
+                // 设置默认刷新间隔为5秒
+                document.getElementById('refreshInterval').value = '5';
+                updateRefreshInterval();
             } catch (error) {
                 alert('获取数据失败：' + error.message);
             } finally {
@@ -729,7 +732,7 @@
                             class="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700">
                             <option value="0">手动刷新</option>
                             <option value="3">3秒</option>
-                            <option value="5">5秒</option>
+                            <option value="5" selected>5秒</option>
                             <option value="10">10秒</option>
                             <option value="30">30秒</option>
                             <option value="60">1分钟</option>
