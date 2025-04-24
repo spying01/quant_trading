@@ -27,6 +27,7 @@
         let originalTitle = "分析系统";
         let currentPrice = null; // 添加当前价格变量
         let currentChange = null; // 添加当前涨跌幅变量
+        let alertSound = null; // 添加提醒音效变量
 
         // DOM加载完成后初始化
         document.addEventListener('DOMContentLoaded', function () {
@@ -34,6 +35,8 @@
             initEventListeners();
             updateHistorySelect();
             document.title = originalTitle; // 设置默认标题
+            // 初始化提醒音效
+            alertSound = new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU...');
         });
 
         // 初始化主题
@@ -491,6 +494,13 @@
 
         // 显示提醒
         function showAlert(message) {
+            // 播放提醒音效
+            if (alertSound) {
+                alertSound.play().catch(error => {
+                    console.error('播放提醒音效失败:', error);
+                });
+            }
+
             // 开始标题闪烁
             let isOriginal = true;
             titleBlinkInterval = setInterval(() => {
