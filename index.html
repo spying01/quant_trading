@@ -26,6 +26,7 @@
         let titleBlinkInterval = null;
         let originalTitle = "分析系统";
         let currentPrice = null; // 添加当前价格变量
+        let currentChange = null; // 添加当前涨跌幅变量
 
         // DOM加载完成后初始化
         document.addEventListener('DOMContentLoaded', function () {
@@ -160,6 +161,7 @@
             if (!code) {
                 alert('请输入股票代码');
                 currentPrice = null; // 清除当前价格
+                currentChange = null; // 清除当前涨跌幅
                 updateTitle(); // 更新标题为默认
                 return;
             }
@@ -228,8 +230,9 @@
                 document.getElementById('support').textContent = data.support;
                 document.getElementById('resistance').textContent = data.resistance;
 
-                // 更新当前价格并更新标题
+                // 更新当前价格和涨跌幅并更新标题
                 currentPrice = data.price;
+                currentChange = data.change;
                 updateTitle();
 
                 updateSignalDisplay(data);
@@ -242,8 +245,8 @@
         // 更新标题
         function updateTitle() {
             if (!titleBlinkInterval) { // 如果没有提醒在闪烁
-                if (currentPrice) {
-                    document.title = currentPrice.toFixed(2);
+                if (currentPrice && currentChange) {
+                    document.title = `${currentPrice.toFixed(2)} ${currentChange}`;
                 } else {
                     document.title = originalTitle;
                 }
@@ -491,7 +494,7 @@
             // 开始标题闪烁
             let isOriginal = true;
             titleBlinkInterval = setInterval(() => {
-                document.title = isOriginal ? `${message}` : (currentPrice ? currentPrice.toFixed(2) : originalTitle);
+                document.title = isOriginal ? `${message}` : (currentPrice && currentChange ? `${currentPrice.toFixed(2)} ${currentChange}` : originalTitle);
                 isOriginal = !isOriginal;
             }, 1000);
 
