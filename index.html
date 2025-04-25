@@ -5,36 +5,43 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>分析系统</title>
-    <!-- 引入必要的CDN -->
+    <!-- 引入外部依赖 -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/text-encoding@0.7.0/lib/encoding.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/preline@2.0.3/dist/preline.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
     <script type="text/javascript">
-        // 腾讯API前缀
-        const TENCENT_API_PREFIX = 'https://web.sqt.gtimg.cn/q=';
-        const MAX_HISTORY_POINTS = 999; // 最大历史数据点数
-        const ALERT_COOLDOWN = 5000; // 5秒冷却时间
+        // 常量配置
+        const CONFIG = {
+            TENCENT_API_PREFIX: 'https://web.sqt.gtimg.cn/q=',  // 腾讯股票API前缀
+            MAX_HISTORY_POINTS: 999,                            // 最大历史数据点数
+            ALERT_COOLDOWN: 5000,                              // 提醒冷却时间(ms)
+            TITLE_BLINK_DURATION: 3000,                        // 标题闪烁持续时间(ms)
+            MAX_HISTORY_RECORDS: 10                            // 最大历史记录数量
+        };
 
-        // 全局变量
-        let chart = null;
-        let refreshTimer = null;
-        let currentStockCode = null;
-        let priceHistory = []; // 存储历史价格数据
-        let lastAlertTime = 0;
-        let titleBlinkInterval = null;
-        let originalTitle = "分析系统";
-        let currentPrice = null; // 添加当前价格变量
-        let currentChange = null; // 添加当前涨跌幅变量
-        let notificationPermission = false; // 通知权限状态
+        // 全局状态管理
+        const State = {
+            chart: null,                    // ECharts实例
+            refreshTimer: null,             // 刷新定时器
+            currentStockCode: null,         // 当前股票代码
+            priceHistory: [],              // 价格历史数据
+            lastAlertTime: 0,              // 上次提醒时间
+            titleBlinkInterval: null,       // 标题闪烁定时器
+            originalTitle: "分析系统",      // 原始标题
+            currentPrice: null,             // 当前价格
+            currentChange: null,            // 当前涨跌幅
+            notificationPermission: false   // 通知权限状态
+        };
 
         // DOM加载完成后初始化
-        document.addEventListener('DOMContentLoaded', function () {
-            initTheme();
-            initEventListeners();
-            updateHistorySelect();
-            document.title = originalTitle; // 设置默认标题
+        document.addEventListener('DOMContentLoaded', () => {
+            initTheme();           // 初始化主题
+            initEventListeners();  // 初始化事件监听
+            updateHistorySelect(); // 更新历史记录选择器
+            document.title = State.originalTitle;
         });
 
         // 初始化主题
@@ -64,9 +71,9 @@
             // 查询按钮点击事件
             document.getElementById('searchBtn').addEventListener('click', function() {
                 // 在用户交互时请求通知权限
-                if (!notificationPermission && Notification.permission !== "granted") {
+                if (!State.notificationPermission && Notification.permission !== "granted") {
                     Notification.requestPermission().then(permission => {
-                        notificationPermission = permission === "granted";
+                        State.notificationPermission = permission === "granted";
                     });
                 }
                 searchStock();
@@ -83,18 +90,18 @@
 
             // 窗口大小改变时调整图表
             window.addEventListener('resize', function () {
-                if (chart) {
-                    chart.resize();
+                if (State.chart) {
+                    State.chart.resize();
                 }
             });
 
             // 页面关闭时清除定时器
             window.addEventListener('beforeunload', function () {
-                if (refreshTimer) {
-                    clearInterval(refreshTimer);
+                if (State.refreshTimer) {
+                    clearInterval(State.refreshTimer);
                 }
-                if (titleBlinkInterval) {
-                    clearInterval(titleBlinkInterval);
+                if (State.titleBlinkInterval) {
+                    clearInterval(State.titleBlinkInterval);
                 }
             });
         }
@@ -108,7 +115,7 @@
             try {
                 // 添加股票代码前缀
                 const fullCode = code.startsWith('6') ? `sh${code}` : `sz${code}`;
-                const response = await fetch(`${TENCENT_API_PREFIX}${fullCode}`);
+                const response = await fetch(`${CONFIG.TENCENT_API_PREFIX}${fullCode}`);
 
                 if (!response.ok) {
                     throw new Error('网络请求失败');
@@ -169,15 +176,15 @@
             const code = document.getElementById('stockCode').value.trim();
             if (!code) {
                 alert('请输入股票代码');
-                currentPrice = null; // 清除当前价格
-                currentChange = null; // 清除当前涨跌幅
+                State.currentPrice = null; // 清除当前价格
+                State.currentChange = null; // 清除当前涨跌幅
                 updateTitle(); // 更新标题为默认
                 return;
             }
 
             try {
                 setLoadingState(true);
-                currentStockCode = code;
+                State.currentStockCode = code;
                 const stockData = await fetchStockData(code);
 
                 // 只在手动输入股票代码时添加到历史记录
@@ -215,10 +222,10 @@
 
         // 更新股票数据
         async function updateStockData() {
-            if (!currentStockCode) return;
+            if (!State.currentStockCode) return;
 
             try {
-                const stockData = await fetchStockData(currentStockCode);
+                const stockData = await fetchStockData(State.currentStockCode);
                 updateStockInfo(stockData);
                 updateChart(stockData);
                 updateLastUpdateTime();
@@ -243,8 +250,8 @@
                 document.getElementById('resistance').textContent = data.resistance;
 
                 // 更新当前价格和涨跌幅并更新标题
-                currentPrice = data.price;
-                currentChange = data.change;
+                State.currentPrice = data.price;
+                State.currentChange = data.change;
                 updateTitle();
 
                 updateSignalDisplay(data);
@@ -256,32 +263,32 @@
 
         // 更新标题
         function updateTitle() {
-            if (!titleBlinkInterval) { // 如果没有提醒在闪烁
-                if (currentPrice && currentChange) {
-                    document.title = `${currentPrice.toFixed(2)} ${currentChange}`;
+            if (!State.titleBlinkInterval) { // 如果没有提醒在闪烁
+                if (State.currentPrice && State.currentChange) {
+                    document.title = `${State.currentPrice.toFixed(2)} ${State.currentChange}`;
                 } else {
-                    document.title = originalTitle;
+                    document.title = State.originalTitle;
                 }
             }
         }
 
         // 更新图表
         function updateChart(data) {
-            if (!chart) {
-                chart = echarts.init(document.getElementById('chart'));
+            if (!State.chart) {
+                State.chart = echarts.init(document.getElementById('chart'));
             }
 
             // 更新价格历史数据
             const now = new Date();
             const timeStr = now.toLocaleTimeString();
-            priceHistory.push({
+            State.priceHistory.push({
                 time: timeStr,
                 price: data.price
             });
 
             // 限制历史数据点数
-            if (priceHistory.length > MAX_HISTORY_POINTS) {
-                priceHistory = priceHistory.slice(-MAX_HISTORY_POINTS);
+            if (State.priceHistory.length > CONFIG.MAX_HISTORY_POINTS) {
+                State.priceHistory = State.priceHistory.slice(-CONFIG.MAX_HISTORY_POINTS);
             }
 
             const option = {
@@ -311,7 +318,7 @@
                 },
                 xAxis: {
                     type: 'category',
-                    data: priceHistory.map(item => item.time),
+                    data: State.priceHistory.map(item => item.time),
                     axisLabel: {
                         rotate: 45
                     }
@@ -330,7 +337,7 @@
                     {
                         name: '实时价格',
                         type: 'line',
-                        data: priceHistory.map(item => item.price),
+                        data: State.priceHistory.map(item => item.price),
                         smooth: true,
                         symbol: 'none',
                         lineStyle: {
@@ -343,7 +350,7 @@
                 ]
             };
 
-            chart.setOption(option);
+            State.chart.setOption(option);
         }
 
         // 更新最后更新时间
@@ -357,12 +364,12 @@
         function updateRefreshInterval() {
             const interval = parseInt(document.getElementById('refreshInterval').value);
 
-            if (refreshTimer) {
-                clearInterval(refreshTimer);
+            if (State.refreshTimer) {
+                clearInterval(State.refreshTimer);
             }
 
-            if (interval > 0 && currentStockCode) {
-                refreshTimer = setInterval(updateStockData, interval * 1000);
+            if (interval > 0 && State.currentStockCode) {
+                State.refreshTimer = setInterval(updateStockData, interval * 1000);
             }
         }
 
@@ -493,11 +500,11 @@
 
             // 检查是否需要提醒
             const now = Date.now();
-            if (now - lastAlertTime > ALERT_COOLDOWN && strongestSignal.strength !== 'weak') {
+            if (now - State.lastAlertTime > CONFIG.ALERT_COOLDOWN && strongestSignal.strength !== 'weak') {
                 const stockName = document.getElementById('name').textContent;
                 const signalType = strongestSignal.type === 'buy' ? '买入' : '卖出';
                 showAlert(`${stockName} ${signalType}信号 (${strongestSignal.strength === 'strong' ? '强' : '中'})`);
-                lastAlertTime = now;
+                State.lastAlertTime = now;
             }
         }
 
@@ -505,7 +512,7 @@
         function showAlert(message) {
             // 播放系统提示音
             try {
-                if (notificationPermission) {
+                if (State.notificationPermission) {
                     new Notification("交易提醒", {
                         body: message,
                         icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230ea5e9'%3E%3Cpath d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z'/%3E%3C/svg%3E",
@@ -518,17 +525,17 @@
 
             // 开始标题闪烁
             let isOriginal = true;
-            titleBlinkInterval = setInterval(() => {
-                document.title = isOriginal ? `${message}` : (currentPrice && currentChange ? `${currentPrice.toFixed(2)} ${currentChange}` : originalTitle);
+            State.titleBlinkInterval = setInterval(() => {
+                document.title = isOriginal ? `${message}` : (State.currentPrice && State.currentChange ? `${State.currentPrice.toFixed(2)} ${State.currentChange}` : State.originalTitle);
                 isOriginal = !isOriginal;
             }, 1000);
 
             // 3秒后停止闪烁
             setTimeout(() => {
-                clearInterval(titleBlinkInterval);
-                titleBlinkInterval = null;
+                clearInterval(State.titleBlinkInterval);
+                State.titleBlinkInterval = null;
                 updateTitle();
-            }, 3000);
+            }, CONFIG.TITLE_BLINK_DURATION);
         }
 
         // 历史记录相关功能
@@ -547,8 +554,8 @@
             // 添加到开头
             history.unshift({ code: code, name: name });
             // 限制历史记录数量为10个
-            if (history.length > 10) {
-                history = history.slice(0, 10);
+            if (history.length > CONFIG.MAX_HISTORY_RECORDS) {
+                history = history.slice(0, CONFIG.MAX_HISTORY_RECORDS);
             }
             localStorage.setItem('stockHistory', JSON.stringify(history));
             updateHistorySelect();
