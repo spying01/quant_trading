@@ -29,7 +29,7 @@
             chart: null,                    // ECharts实例
             refreshTimer: null,             // 刷新定时器
             currentStockCode: null,         // 当前股票代码
-            priceHistory: [],              // 价格历史数据
+            priceHistory: {},              // 价格历史数据，按股票代码存储
             lastAlertTime: 0,              // 上次提醒时间
             titleBlinkInterval: null,       // 标题闪烁定时器
             originalTitle: "分析系统",      // 原始标题
@@ -191,7 +191,29 @@
 
             try {
                 setLoadingState(true);
-                State.currentStockCode = code;
+                
+                // 如果切换了股票，重置图表
+                if (State.currentStockCode !== code) {
+                    // 清除之前的定时器
+                    if (State.refreshTimer) {
+                        clearInterval(State.refreshTimer);
+                    }
+                    if (State.titleBlinkInterval) {
+                        clearInterval(State.titleBlinkInterval);
+                    }
+                    if (State.changeBlinkInterval) {
+                        clearInterval(State.changeBlinkInterval);
+                    }
+                    
+                    // 重置图表
+                    if (State.chart) {
+                        State.chart.clear();
+                    }
+                    
+                    // 更新当前股票代码
+                    State.currentStockCode = code;
+                }
+
                 const stockData = await fetchStockData(code);
 
                 // 只在手动输入股票代码时添加到历史记录
@@ -243,13 +265,16 @@
 
         // 检测短期价格变化
         function checkShortTermPriceChange() {
-            if (State.priceHistory.length < 2) return null;
+            if (!State.currentStockCode || !State.priceHistory[State.currentStockCode]) return null;
+            
+            const priceHistory = State.priceHistory[State.currentStockCode];
+            if (priceHistory.length < 2) return null;
 
             const now = new Date();
             const windowStart = new Date(now - CONFIG.SHORT_TERM_WINDOW * 60 * 1000);
             
             // 获取时间窗口内的价格数据
-            const windowPrices = State.priceHistory.filter(item => {
+            const windowPrices = priceHistory.filter(item => {
                 const itemTime = new Date(item.time);
                 return itemTime >= windowStart;
             });
@@ -344,17 +369,23 @@
                 State.chart = echarts.init(document.getElementById('chart'));
             }
 
+            // 确保当前股票的价格历史数组存在
+            if (!State.priceHistory[State.currentStockCode]) {
+                State.priceHistory[State.currentStockCode] = [];
+            }
+
             // 更新价格历史数据
             const now = new Date();
             const timeStr = now.toLocaleTimeString();
-            State.priceHistory.push({
+            State.priceHistory[State.currentStockCode].push({
                 time: timeStr,
                 price: data.price
             });
 
             // 限制历史数据点数
-            if (State.priceHistory.length > CONFIG.MAX_HISTORY_POINTS) {
-                State.priceHistory = State.priceHistory.slice(-CONFIG.MAX_HISTORY_POINTS);
+            if (State.priceHistory[State.currentStockCode].length > CONFIG.MAX_HISTORY_POINTS) {
+                State.priceHistory[State.currentStockCode] = 
+                    State.priceHistory[State.currentStockCode].slice(-CONFIG.MAX_HISTORY_POINTS);
             }
 
             const option = {
@@ -384,7 +415,7 @@
                 },
                 xAxis: {
                     type: 'category',
-                    data: State.priceHistory.map(item => item.time),
+                    data: State.priceHistory[State.currentStockCode].map(item => item.time),
                     axisLabel: {
                         rotate: 45
                     }
@@ -403,7 +434,7 @@
                     {
                         name: '实时价格',
                         type: 'line',
-                        data: State.priceHistory.map(item => item.price),
+                        data: State.priceHistory[State.currentStockCode].map(item => item.price),
                         smooth: true,
                         symbol: 'none',
                         lineStyle: {
