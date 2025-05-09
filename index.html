@@ -71,7 +71,16 @@
                 // 只允许输入数字
                 this.value = this.value.replace(/[^\d]/g, '');
                 // 启用/禁用查询按钮
-                document.getElementById('searchBtn').disabled = this.value.length !== 6;
+                const searchBtn = document.getElementById('searchBtn');
+                searchBtn.disabled = this.value.length !== 6;
+                searchBtn.classList.toggle('opacity-50', this.value.length !== 6);
+                searchBtn.classList.toggle('cursor-not-allowed', this.value.length !== 6);
+            });
+
+            // 添加触摸事件支持
+            stockCodeInput.addEventListener('touchend', function(e) {
+                e.preventDefault();
+                this.focus();
             });
 
             stockCodeInput.addEventListener('keypress', function (e) {
@@ -82,7 +91,18 @@
             });
 
             // 查询按钮点击事件
-            document.getElementById('searchBtn').addEventListener('click', function() {
+            const searchBtn = document.getElementById('searchBtn');
+            
+            // 添加触摸事件支持
+            searchBtn.addEventListener('touchend', function(e) {
+                e.preventDefault();
+                if (stockCodeInput.value.length === 6) {
+                    searchStock();
+                }
+            });
+
+            searchBtn.addEventListener('click', function(e) {
+                e.preventDefault();
                 if (stockCodeInput.value.length !== 6) {
                     alert('请输入6位股票代码');
                     return;
@@ -128,9 +148,6 @@
                     clearInterval(State.changeBlinkInterval);
                 }
             });
-
-            // 添加触摸事件支持
-            document.addEventListener('touchstart', function() {}, {passive: true});
         }
 
         // 获取股票数据
@@ -265,11 +282,14 @@
                 searchText.textContent = '查询中...';
                 searchSpinner.classList.remove('hidden');
                 searchBtn.disabled = true;
+                searchBtn.classList.add('opacity-50', 'cursor-not-allowed');
                 stockCodeInput.disabled = true;
             } else {
                 searchText.textContent = '查询';
                 searchSpinner.classList.add('hidden');
-                searchBtn.disabled = false;
+                searchBtn.disabled = stockCodeInput.value.length !== 6;
+                searchBtn.classList.toggle('opacity-50', stockCodeInput.value.length !== 6);
+                searchBtn.classList.toggle('cursor-not-allowed', stockCodeInput.value.length !== 6);
                 stockCodeInput.disabled = false;
             }
         }
