@@ -65,15 +65,28 @@
                 localStorage.setItem('theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
             });
 
-            // 股票代码输入框回车事件
-            document.getElementById('stockCode').addEventListener('keypress', function (e) {
-                if (e.key === 'Enter') {
+            // 股票代码输入框事件
+            const stockCodeInput = document.getElementById('stockCode');
+            stockCodeInput.addEventListener('input', function(e) {
+                // 只允许输入数字
+                this.value = this.value.replace(/[^\d]/g, '');
+                // 启用/禁用查询按钮
+                document.getElementById('searchBtn').disabled = this.value.length !== 6;
+            });
+
+            stockCodeInput.addEventListener('keypress', function (e) {
+                if (e.key === 'Enter' && this.value.length === 6) {
+                    e.preventDefault();
                     searchStock();
                 }
             });
 
             // 查询按钮点击事件
             document.getElementById('searchBtn').addEventListener('click', function() {
+                if (stockCodeInput.value.length !== 6) {
+                    alert('请输入6位股票代码');
+                    return;
+                }
                 // 在用户交互时请求通知权限
                 if (!State.notificationPermission && Notification.permission !== "granted") {
                     Notification.requestPermission().then(permission => {
@@ -93,10 +106,14 @@
             document.getElementById('refreshInterval').addEventListener('change', updateRefreshInterval);
 
             // 窗口大小改变时调整图表
+            let resizeTimer;
             window.addEventListener('resize', function () {
-                if (State.chart) {
-                    State.chart.resize();
-                }
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(function() {
+                    if (State.chart) {
+                        State.chart.resize();
+                    }
+                }, 200);
             });
 
             // 页面关闭时清除定时器
@@ -111,6 +128,9 @@
                     clearInterval(State.changeBlinkInterval);
                 }
             });
+
+            // 添加触摸事件支持
+            document.addEventListener('touchstart', function() {}, {passive: true});
         }
 
         // 获取股票数据
@@ -181,11 +201,12 @@
         // 查询股票
         async function searchStock() {
             const code = document.getElementById('stockCode').value.trim();
-            if (!code) {
-                alert('请输入股票代码');
-                State.currentPrice = null; // 清除当前价格
-                State.currentChange = null; // 清除当前涨跌幅
-                updateTitle(); // 更新标题为默认
+            if (!code || code.length !== 6) {
+                alert('请输入6位股票代码');
+                State.currentPrice = null;
+                State.currentChange = null;
+                updateTitle();
+                setLoadingState(false);  // 确保在错误时重置加载状态
                 return;
             }
 
@@ -226,9 +247,10 @@
                 document.getElementById('refreshInterval').value = '5';
                 updateRefreshInterval();
             } catch (error) {
+                console.error('查询失败:', error);
                 alert('获取数据失败：' + error.message);
             } finally {
-                setLoadingState(false);
+                setLoadingState(false);  // 确保在任何情况下都重置加载状态
             }
         }
 
@@ -237,15 +259,18 @@
             const searchText = document.getElementById('searchText');
             const searchSpinner = document.getElementById('searchSpinner');
             const searchBtn = document.getElementById('searchBtn');
+            const stockCodeInput = document.getElementById('stockCode');
 
             if (isLoading) {
                 searchText.textContent = '查询中...';
                 searchSpinner.classList.remove('hidden');
                 searchBtn.disabled = true;
+                stockCodeInput.disabled = true;
             } else {
                 searchText.textContent = '查询';
                 searchSpinner.classList.add('hidden');
                 searchBtn.disabled = false;
+                stockCodeInput.disabled = false;
             }
         }
 
@@ -819,7 +844,7 @@
                 <div class="flex justify-between h-16">
                     <div class="flex items-center">
                         <h1 class="text-xl font-semibold bg-gradient-to-r from-primary-600 to-primary-400 bg-clip-text text-transparent">
-                            量化分析系统
+                            量化模拟分析
                         </h1>
                     </div>
                     <div class="flex items-center space-x-4">
@@ -834,14 +859,15 @@
         </nav>
 
         <!-- 主要内容区域 -->
-        <main class="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <main class="flex-grow w-4/5 mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <!-- 搜索区域 -->
             <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mb-6 animate-fade-in card-hover">
-                <div class="flex flex-col sm:flex-row gap-4 items-center">
+                <div class="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center">
                     <div class="flex-1 w-full">
                         <input type="text" id="stockCode"
                             class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200"
-                            placeholder="输入股票代码（如：600519）" maxlength="6">
+                            placeholder="输入股票代码（如：600519）" maxlength="6"
+                            inputmode="numeric" pattern="[0-9]*">
                     </div>
                     <div class="flex items-center gap-2 w-full sm:w-auto">
                         <select id="historyStocks"
@@ -854,7 +880,8 @@
                         </button>
                     </div>
                     <button id="searchBtn"
-                        class="w-full sm:w-auto px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors btn-hover flex items-center justify-center min-w-[100px]">
+                        class="w-full sm:w-auto px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors btn-hover flex items-center justify-center min-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed"
+                        type="button">
                         <span id="searchText">查询</span>
                         <span id="searchSpinner" class="hidden ml-2">
                             <i class="fas fa-spinner fa-spin"></i>
@@ -876,73 +903,76 @@
             </div>
 
             <!-- 股票信息卡片 -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                <!-- 基本信息卡片 -->
-                <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
-                    <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">基本信息</h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">股票代码：</span>
-                            <span id="code" class="font-medium">-</span>
+            <div class="grid grid-cols-1 gap-6 mb-6">
+                <!-- 第一行：基本信息和量化分析 -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- 基本信息卡片 -->
+                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
+                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">基本信息</h3>
+                        <div class="space-y-3">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">股票代码：</span>
+                                <span id="code" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">股票名称：</span>
+                                <span id="name" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">当前价格：</span>
+                                <span id="price" class="font-medium price-up">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">日涨跌幅：</span>
+                                <span id="change" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">今日最高：</span>
+                                <span id="high" class="font-medium price-up">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">今日最低：</span>
+                                <span id="low" class="font-medium price-down">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">最高涨幅：</span>
+                                <span id="maxGain" class="font-medium price-up">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">最低跌幅：</span>
+                                <span id="maxLoss" class="font-medium price-down">-</span>
+                            </div>
                         </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">股票名称：</span>
-                            <span id="name" class="font-medium">-</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">当前价格：</span>
-                            <span id="price" class="font-medium price-up">-</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">日涨跌幅：</span>
-                            <span id="change" class="font-medium">-</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">今日最高：</span>
-                            <span id="high" class="font-medium price-up">-</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">今日最低：</span>
-                            <span id="low" class="font-medium price-down">-</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">最高涨幅：</span>
-                            <span id="maxGain" class="font-medium price-up">-</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">最低跌幅：</span>
-                            <span id="maxLoss" class="font-medium price-down">-</span>
+                    </div>
+
+                    <!-- 量化分析卡片 -->
+                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
+                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">量化分析</h3>
+                        <div class="space-y-3">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">趋势判断：</span>
+                                <span id="trend" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">支撑位：</span>
+                                <span id="support" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">压力位：</span>
+                                <span id="resistance" class="font-medium">-</span>
+                            </div>
+                            <div id="signal" class="signal mt-4 p-4 rounded-lg text-center font-medium">
+                                等待查询...
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- 量化分析卡片 -->
+                <!-- 第二行：图表区域 -->
                 <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
-                    <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">量化分析</h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">趋势判断：</span>
-                            <span id="trend" class="font-medium">-</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">支撑位：</span>
-                            <span id="support" class="font-medium">-</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-600 dark:text-gray-400">压力位：</span>
-                            <span id="resistance" class="font-medium">-</span>
-                        </div>
-                        <div id="signal" class="signal mt-4 p-4 rounded-lg text-center font-medium">
-                            等待查询...
-                        </div>
-                    </div>
+                    <div id="chart" class="h-[500px]"></div>
+                    <div id="lastUpdate" class="text-sm text-gray-500 dark:text-gray-400 mt-2 text-right"></div>
                 </div>
-            </div>
-
-            <!-- 图表区域 -->
-            <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
-                <div id="chart" class="h-[500px]"></div>
-                <div id="lastUpdate" class="text-sm text-gray-500 dark:text-gray-400 mt-2 text-right"></div>
             </div>
         </main>
 
