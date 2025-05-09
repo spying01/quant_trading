@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>分析系统</title>
+    <title>分析模拟</title>
     <!-- 引入外部依赖 -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
@@ -19,7 +19,9 @@
             MAX_HISTORY_POINTS: 999,                            // 最大历史数据点数
             ALERT_COOLDOWN: 5000,                              // 提醒冷却时间(ms)
             TITLE_BLINK_DURATION: 3000,                        // 标题闪烁持续时间(ms)
-            MAX_HISTORY_RECORDS: 10                            // 最大历史记录数量
+            MAX_HISTORY_RECORDS: 10,                           // 最大历史记录数量
+            SHORT_TERM_THRESHOLD: 1.0,                         // 短期价格变化阈值(%)
+            SHORT_TERM_WINDOW: 5                               // 短期时间窗口(分钟)
         };
 
         // 全局状态管理
@@ -33,7 +35,9 @@
             originalTitle: "分析系统",      // 原始标题
             currentPrice: null,             // 当前价格
             currentChange: null,            // 当前涨跌幅
-            notificationPermission: false   // 通知权限状态
+            notificationPermission: false,  // 通知权限状态
+            lastPriceCheck: null,          // 上次价格检查时间
+            changeBlinkInterval: null      // 涨跌幅闪烁定时器
         };
 
         // DOM加载完成后初始化
@@ -102,6 +106,9 @@
                 }
                 if (State.titleBlinkInterval) {
                     clearInterval(State.titleBlinkInterval);
+                }
+                if (State.changeBlinkInterval) {
+                    clearInterval(State.changeBlinkInterval);
                 }
             });
         }
@@ -234,6 +241,32 @@
             }
         }
 
+        // 检测短期价格变化
+        function checkShortTermPriceChange() {
+            if (State.priceHistory.length < 2) return null;
+
+            const now = new Date();
+            const windowStart = new Date(now - CONFIG.SHORT_TERM_WINDOW * 60 * 1000);
+            
+            // 获取时间窗口内的价格数据
+            const windowPrices = State.priceHistory.filter(item => {
+                const itemTime = new Date(item.time);
+                return itemTime >= windowStart;
+            });
+
+            if (windowPrices.length < 2) return null;
+
+            // 计算价格变化百分比
+            const firstPrice = windowPrices[0].price;
+            const lastPrice = windowPrices[windowPrices.length - 1].price;
+            const changePercent = ((lastPrice - firstPrice) / firstPrice) * 100;
+
+            return {
+                change: changePercent,
+                isSignificant: Math.abs(changePercent) >= CONFIG.SHORT_TERM_THRESHOLD
+            };
+        }
+
         // 更新股票信息显示
         function updateStockInfo(data) {
             try {
@@ -241,18 +274,51 @@
                     throw new Error('数据无效');
                 }
 
+                // 更新基本信息
                 document.getElementById('code').textContent = document.getElementById('stockCode').value;
                 document.getElementById('name').textContent = data.name;
                 document.getElementById('price').textContent = data.price.toFixed(2);
-                document.getElementById('change').textContent = data.change;
+                
+                // 更新涨跌幅显示
+                const changeElement = document.getElementById('change');
+                const changeValue = parseFloat(data.change);
+                changeElement.textContent = data.change;
+                
+                // 清除之前的闪烁效果
+                if (State.changeBlinkInterval) {
+                    clearInterval(State.changeBlinkInterval);
+                }
+                
+                // 移除之前的样式
+                changeElement.classList.remove('price-up', 'price-down', 'blink');
+                
+                // 添加新的样式
+                if (changeValue > 0) {
+                    changeElement.classList.add('price-up', 'blink');
+                } else if (changeValue < 0) {
+                    changeElement.classList.add('price-down', 'blink');
+                }
+
                 document.getElementById('trend').textContent = data.trend;
                 document.getElementById('support').textContent = data.support;
                 document.getElementById('resistance').textContent = data.resistance;
+                document.getElementById('high').textContent = data.high.toFixed(2);
+                document.getElementById('low').textContent = data.low.toFixed(2);
+                document.getElementById('maxGain').textContent = ((data.high - data.lastClose) / data.lastClose * 100).toFixed(2) + '%';
+                document.getElementById('maxLoss').textContent = ((data.low - data.lastClose) / data.lastClose * 100).toFixed(2) + '%';
 
-                // 更新当前价格和涨跌幅并更新标题
+                // 更新当前价格和涨跌幅
                 State.currentPrice = data.price;
                 State.currentChange = data.change;
-                updateTitle();
+
+                // 检查短期价格变化
+                const shortTermChange = checkShortTermPriceChange();
+                if (shortTermChange && shortTermChange.isSignificant) {
+                    const message = `${data.name} ${shortTermChange.change > 0 ? '上涨' : '下跌'} ${Math.abs(shortTermChange.change).toFixed(2)}%`;
+                    showAlert(message);
+                } else {
+                    updateTitle(); // 如果没有显著变化，正常更新标题
+                }
 
                 updateSignalDisplay(data);
             } catch (error) {
@@ -510,13 +576,17 @@
 
         // 显示提醒
         function showAlert(message) {
+            const now = Date.now();
+            if (now - State.lastAlertTime < CONFIG.ALERT_COOLDOWN) return;
+            State.lastAlertTime = now;
+
             // 播放系统提示音
             try {
                 if (State.notificationPermission) {
-                    new Notification("交易提醒", {
+                    new Notification("价格提醒", {
                         body: message,
                         icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230ea5e9'%3E%3Cpath d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z'/%3E%3C/svg%3E",
-                        silent: false // 使用系统默认提示音
+                        silent: false
                     });
                 }
             } catch (error) {
@@ -525,12 +595,17 @@
 
             // 开始标题闪烁
             let isOriginal = true;
+            if (State.titleBlinkInterval) {
+                clearInterval(State.titleBlinkInterval);
+            }
+            
             State.titleBlinkInterval = setInterval(() => {
-                document.title = isOriginal ? `${message}` : (State.currentPrice && State.currentChange ? `${State.currentPrice.toFixed(2)} ${State.currentChange}` : State.originalTitle);
+                document.title = isOriginal ? message : (State.currentPrice && State.currentChange ? 
+                    `${State.currentPrice.toFixed(2)} ${State.currentChange}` : State.originalTitle);
                 isOriginal = !isOriginal;
             }, 1000);
 
-            // 3秒后停止闪烁
+            // 设置闪烁持续时间
             setTimeout(() => {
                 clearInterval(State.titleBlinkInterval);
                 State.titleBlinkInterval = null;
@@ -685,6 +760,22 @@
                 border: 1px solid rgba(156, 163, 175, 0.5);
                 color: rgb(156, 163, 175);
             }
+            .price-up {
+                color: rgb(239, 68, 68);
+                font-weight: 600;
+            }
+            .price-down {
+                color: rgb(16, 185, 129);
+                font-weight: 600;
+            }
+            @keyframes blink {
+                0% { opacity: 1; }
+                50% { opacity: 0.5; }
+                100% { opacity: 1; }
+            }
+            .blink {
+                animation: blink 1s infinite;
+            }
         }
     </style>
 </head>
@@ -764,11 +855,27 @@
                         </div>
                         <div class="flex justify-between">
                             <span class="text-gray-600 dark:text-gray-400">当前价格：</span>
-                            <span id="price" class="font-medium">-</span>
+                            <span id="price" class="font-medium price-up">-</span>
                         </div>
                         <div class="flex justify-between">
                             <span class="text-gray-600 dark:text-gray-400">日涨跌幅：</span>
                             <span id="change" class="font-medium">-</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">今日最高：</span>
+                            <span id="high" class="font-medium price-up">-</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">今日最低：</span>
+                            <span id="low" class="font-medium price-down">-</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">最高涨幅：</span>
+                            <span id="maxGain" class="font-medium price-up">-</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">最低跌幅：</span>
+                            <span id="maxLoss" class="font-medium price-down">-</span>
                         </div>
                     </div>
                 </div>
