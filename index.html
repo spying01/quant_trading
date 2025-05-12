@@ -374,6 +374,7 @@
                 document.getElementById('resistance').textContent = data.resistance;
                 document.getElementById('high').textContent = data.high.toFixed(2);
                 document.getElementById('low').textContent = data.low.toFixed(2);
+                document.getElementById('lastClose').textContent = data.lastClose.toFixed(2);
                 document.getElementById('maxGain').textContent = ((data.high - data.lastClose) / data.lastClose * 100).toFixed(2) + '%';
                 document.getElementById('maxLoss').textContent = ((data.low - data.lastClose) / data.lastClose * 100).toFixed(2) + '%';
 
@@ -953,6 +954,10 @@
                             <div class="flex justify-between">
                                 <span class="text-gray-600 dark:text-gray-400">今日最低：</span>
                                 <span id="low" class="font-medium price-down">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">昨日收盘：</span>
+                                <span id="lastClose" class="font-medium">-</span>
                             </div>
                             <div class="flex justify-between">
                                 <span class="text-gray-600 dark:text-gray-400">最高涨幅：</span>
