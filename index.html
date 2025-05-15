@@ -544,6 +544,9 @@
                 document.getElementById('name').textContent = data.name;
                 document.getElementById('price').textContent = data.price.toFixed(2);
                 
+                // 更新价格提醒输入框的默认值
+                document.getElementById('alertValue').value = data.price.toFixed(2);
+                
                 // 更新涨跌幅显示
                 const changeElement = document.getElementById('change');
                 const changeValue = parseFloat(data.change);
@@ -582,6 +585,9 @@
                 State.currentPrice = data.price;
                 State.currentChange = data.change;
 
+                // 更新标题
+                updateTitle();
+
                 // 检查价格提醒
                 checkPriceAlerts(data);
 
@@ -601,7 +607,7 @@
                 if (State.currentPrice && State.currentChange) {
                     document.title = `${State.currentPrice.toFixed(2)} ${State.currentChange}`;
                 } else {
-                    document.title = State.originalTitle;
+                    document.title = "监控分析";
                 }
             }
         }
@@ -884,7 +890,7 @@
             if (strongestSignal.strength !== 'weak') {
                 const stockName = document.getElementById('name').textContent;
                 const signalType = strongestSignal.type === 'buy' ? '买入' : '卖出';
-                const message = `${stockName} ${signalType}信号 (${strongestSignal.strength === 'strong' ? '强' : '中'})`;
+                const message = `${stockName}${signalType}${strongestSignal.strength === 'strong' ? '强' : '中'}`;
                 const details = `原因: ${strongestSignal.reason}`;
                 showAlert(message, details, 'signal');
             }
@@ -1063,18 +1069,18 @@
             switch (alert.type) {
                 case CONFIG.PRICE_ALERT_TYPES.ABOVE:
                     triggered = currentPrice > alert.value;
-                    message = `${data.name} 价格高于 ${alert.value}`;
+                    message = `${currentPrice.toFixed(2)}高于${alert.value}`;
                     details = `当前价格: ${currentPrice.toFixed(2)} 目标价: ${alert.value}`;
                     break;
                 case CONFIG.PRICE_ALERT_TYPES.BELOW:
                     triggered = currentPrice < alert.value;
-                    message = `${data.name} 价格低于 ${alert.value}`;
+                    message = `${currentPrice.toFixed(2)}低于${alert.value}`;
                     details = `当前价格: ${currentPrice.toFixed(2)} 目标价: ${alert.value}`;
                     break;
                 case CONFIG.PRICE_ALERT_TYPES.CHANGE:
                     const change = parseFloat(data.change);
                     triggered = Math.abs(change) > alert.value;
-                    message = `${data.name} 涨跌幅超过 ${alert.value}%`;
+                    message = `${currentPrice.toFixed(2)}涨跌超${alert.value}%`;
                     details = `当前涨跌幅: ${change.toFixed(2)}% 目标: ${alert.value}%`;
                     break;
             }
@@ -1106,8 +1112,30 @@
             };
 
             State.priceAlerts.set(State.currentStockCode, alert);
-            console.log('添加价格提醒:', alert); // 添加调试日志
+            // 显示设置的价格
+            document.getElementById('alertValue').value = value;
             showError(`已设置${type === CONFIG.PRICE_ALERT_TYPES.ABOVE ? '高于' : type === CONFIG.PRICE_ALERT_TYPES.BELOW ? '低于' : '涨跌幅超过'} ${value}${type === CONFIG.PRICE_ALERT_TYPES.CHANGE ? '%' : ''} 的价格提醒`);
+        }
+
+        // 重置价格提醒
+        function resetPriceAlert() {
+            if (!State.currentStockCode) {
+                showError('请先查询股票');
+                return;
+            }
+
+            State.priceAlerts.delete(State.currentStockCode);
+            // 重置为当前股价
+            document.getElementById('alertValue').value = State.currentPrice ? State.currentPrice.toFixed(2) : '';
+            showError('已重置价格提醒');
+        }
+
+        // 调整价格提醒值
+        function adjustAlertValue(delta) {
+            const input = document.getElementById('alertValue');
+            const currentValue = parseFloat(input.value) || 0;
+            const newValue = (currentValue + delta).toFixed(2);
+            input.value = newValue;
         }
 
         // 格式化交易量
@@ -1455,10 +1483,14 @@
                                             <option value="below">价格低于</option>
                                             <option value="change">涨跌幅超过</option>
                                         </select>
-                                        <input type="number" id="alertValue" class="w-24 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" placeholder="数值">
+                                        <input type="number" id="alertValue" step="0.01" class="w-24 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" placeholder="数值">
                                         <button onclick="addPriceAlert(document.getElementById('alertType').value, document.getElementById('alertValue').value)" 
                                                 class="px-3 py-1 bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors">
                                             设置
+                                        </button>
+                                        <button onclick="resetPriceAlert()" 
+                                                class="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors">
+                                            重置
                                         </button>
                                     </div>
                                 </div>
