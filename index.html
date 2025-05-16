@@ -1,0 +1,1603 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>监控分析</title>
+    <!-- 引入外部依赖 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/text-encoding@0.7.0/lib/encoding.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/preline@2.0.3/dist/preline.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
+    <script type="text/javascript">
+        // 常量配置
+        const CONFIG = {
+            TENCENT_API_PREFIX: 'https://web.sqt.gtimg.cn/q=',  // 腾讯股票API前缀
+            MAX_HISTORY_POINTS: 999,                            // 最大历史数据点数
+            ALERT_COOLDOWN: 5000,                              // 提醒冷却时间(ms)
+            TITLE_BLINK_DURATION: 3000,                        // 标题闪烁持续时间(ms)
+            MAX_HISTORY_RECORDS: 10,                           // 最大历史记录数量
+            SHORT_TERM_THRESHOLD: 1.0,                         // 短期价格变化阈值(%)
+            SHORT_TERM_WINDOW: 5,                               // 短期时间窗口(分钟)
+            RETRY_ATTEMPTS: 3,                                 // 请求重试次数
+            RETRY_DELAY: 1000,                                 // 重试延迟时间(ms)
+            CACHE_DURATION: 60000,                              // 缓存持续时间(ms)
+            KEYBOARD_SHORTCUTS: {                              // 键盘快捷键配置
+                SEARCH: 'Enter',
+                REFRESH: 'r',
+                CLEAR: 'Escape'
+            },
+            PRICE_ALERT_TYPES: {                               // 价格提醒类型
+                ABOVE: 'above',
+                BELOW: 'below',
+                CHANGE: 'change'
+            },
+            VERSION: '1.0.0',                                  // 当前版本
+            UPDATE_CHECK_INTERVAL: 86400000,                   // 版本检查间隔(ms)
+            UPDATE_LOG: [                                      // 更新日志
+                {
+                    version: '1.0.0',
+                    date: '2024-03-20',
+                    changes: [
+                        '初始版本发布',
+                        '支持实时股票数据查询',
+                        '支持价格走势图表显示',
+                        '支持自定义价格提醒',
+                        '支持深色/浅色主题切换'
+                    ]
+                }
+            ]
+        };
+
+        // 全局状态管理
+        const State = {
+            chart: null,                    // ECharts实例
+            refreshTimer: null,             // 刷新定时器
+            currentStockCode: null,         // 当前股票代码
+            priceHistory: {},              // 价格历史数据，按股票代码存储
+            lastAlertTime: 0,              // 上次提醒时间
+            titleBlinkInterval: null,       // 标题闪烁定时器
+            originalTitle: "监控分析",      // 原始标题
+            currentPrice: null,             // 当前价格
+            currentChange: null,            // 当前涨跌幅
+            notificationPermission: false,  // 通知权限状态
+            lastPriceCheck: null,          // 上次价格检查时间
+            changeBlinkInterval: null,      // 涨跌幅闪烁定时器
+            dataCache: new Map(),          // 数据缓存
+            retryCount: 0,                 // 重试计数器
+            isLoading: false,              // 加载状态
+            errorMessage: null,            // 错误信息
+            priceAlerts: new Map(),        // 价格提醒列表
+            volumeHistory: {},             // 交易量历史数据
+            lastUpdateCheck: null,         // 上次版本检查时间
+            updateLog: [],                 // 更新日志
+            priceAlertBlinkInterval: null, // 价格提醒闪烁定时器
+            signalBlinkInterval: null,     // 买卖信号闪烁定时器
+            priceAlertDisplayCount: 0,     // 价格提醒显示计数
+            signalDisplayCount: 0          // 买卖信号显示计数
+        };
+
+        // DOM加载完成后初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            initTheme();           // 初始化主题
+            initEventListeners();  // 初始化事件监听
+            updateHistorySelect(); // 更新历史记录选择器
+            initKeyboardShortcuts(); // 初始化键盘快捷键
+            checkForUpdates();     // 检查更新
+            document.title = State.originalTitle;
+        });
+
+        // 初始化主题
+        function initTheme() {
+            if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+        }
+
+        // 初始化事件监听
+        function initEventListeners() {
+            // 主题切换
+            document.getElementById('themeToggle').addEventListener('click', function () {
+                document.documentElement.classList.toggle('dark');
+                localStorage.setItem('theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
+            });
+
+            // 股票代码输入框事件
+            const stockCodeInput = document.getElementById('stockCode');
+            stockCodeInput.addEventListener('input', function(e) {
+                // 只允许输入数字
+                this.value = this.value.replace(/[^\d]/g, '');
+                // 启用/禁用查询按钮
+                const searchBtn = document.getElementById('searchBtn');
+                searchBtn.disabled = this.value.length !== 6;
+                searchBtn.classList.toggle('opacity-50', this.value.length !== 6);
+                searchBtn.classList.toggle('cursor-not-allowed', this.value.length !== 6);
+            });
+
+            // 添加触摸事件支持
+            stockCodeInput.addEventListener('touchend', function(e) {
+                e.preventDefault();
+                this.focus();
+            });
+
+            stockCodeInput.addEventListener('keypress', function (e) {
+                if (e.key === 'Enter' && this.value.length === 6) {
+                    e.preventDefault();
+                    searchStock();
+                }
+            });
+
+            // 查询按钮点击事件
+            const searchBtn = document.getElementById('searchBtn');
+            
+            // 添加触摸事件支持
+            searchBtn.addEventListener('touchend', function(e) {
+                e.preventDefault();
+                if (stockCodeInput.value.length === 6) {
+                    searchStock();
+                }
+            });
+
+            searchBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (stockCodeInput.value.length !== 6) {
+                    alert('请输入6位股票代码');
+                    return;
+                }
+                // 在用户交互时请求通知权限
+                requestNotificationPermission();
+                searchStock();
+            });
+
+            // 历史记录选择事件
+            document.getElementById('historyStocks').addEventListener('change', selectHistoryStock);
+
+            // 删除历史记录按钮事件
+            document.getElementById('deleteHistory').addEventListener('click', deleteHistoryStock);
+
+            // 刷新间隔选择事件
+            document.getElementById('refreshInterval').addEventListener('change', updateRefreshInterval);
+
+            // 窗口大小改变时调整图表
+            let resizeTimer;
+            window.addEventListener('resize', function () {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(function() {
+                    if (State.chart) {
+                        State.chart.resize();
+                    }
+                }, 200);
+            });
+
+            // 页面关闭时清除定时器
+            window.addEventListener('beforeunload', function () {
+                if (State.refreshTimer) {
+                    clearInterval(State.refreshTimer);
+                }
+                if (State.titleBlinkInterval) {
+                    clearInterval(State.titleBlinkInterval);
+                }
+                if (State.changeBlinkInterval) {
+                    clearInterval(State.changeBlinkInterval);
+                }
+            });
+
+            // 价格提醒输入框回车事件
+            document.getElementById('alertValue').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const type = document.getElementById('alertType').value;
+                    const value = this.value;
+                    addPriceAlert(type, value);
+                }
+            });
+        }
+
+        // 请求通知权限
+        function requestNotificationPermission() {
+            if (!State.notificationPermission && Notification.permission !== "granted") {
+                Notification.requestPermission().then(permission => {
+                    State.notificationPermission = permission === "granted";
+                    if (permission === "granted") {
+                        showError("通知权限已启用");
+                    }
+                });
+            }
+        }
+
+        // 初始化键盘快捷键
+        function initKeyboardShortcuts() {
+            document.addEventListener('keydown', (e) => {
+                // 如果正在输入框中，不触发快捷键
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
+                    return;
+                }
+
+                switch(e.key.toLowerCase()) {
+                    case CONFIG.KEYBOARD_SHORTCUTS.SEARCH:
+                        if (document.getElementById('stockCode').value.length === 6) {
+                            searchStock();
+                        }
+                        break;
+                    case CONFIG.KEYBOARD_SHORTCUTS.REFRESH:
+                        if (State.currentStockCode) {
+                            updateStockData();
+                        }
+                        break;
+                    case CONFIG.KEYBOARD_SHORTCUTS.CLEAR:
+                        clearAllData();
+                        break;
+                }
+            });
+        }
+
+        // 清除所有数据
+        function clearAllData() {
+            State.currentStockCode = null;
+            State.currentPrice = null;
+            State.currentChange = null;
+            document.getElementById('stockCode').value = '';
+            if (State.chart) {
+                State.chart.clear();
+            }
+            resetDisplay();
+        }
+
+        // 重置显示
+        function resetDisplay() {
+            const elements = ['code', 'name', 'price', 'change', 'trend', 'support', 'resistance', 'high', 'low', 'lastClose', 'maxGain', 'maxLoss'];
+            elements.forEach(id => {
+                document.getElementById(id).textContent = '-';
+            });
+            document.getElementById('signal').innerHTML = '等待查询...';
+            document.getElementById('lastUpdate').textContent = '';
+            updateTitle();
+        }
+
+        // 显示错误提示
+        function showError(message) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'fixed top-4 right-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded shadow-lg z-50 animate-fade-in';
+            errorDiv.innerHTML = `
+                <div class="flex items-center">
+                    <i class="fas fa-exclamation-circle mr-2"></i>
+                    <span>${message}</span>
+                </div>
+            `;
+            document.body.appendChild(errorDiv);
+            setTimeout(() => {
+                errorDiv.remove();
+            }, 5000);
+        }
+
+        // 显示空状态
+        function showEmptyState() {
+            const emptyStateHTML = `
+                <div class="flex flex-col items-center justify-center h-64 text-gray-500 dark:text-gray-400">
+                    <i class="fas fa-chart-line text-4xl mb-4"></i>
+                    <p class="text-lg">暂无数据</p>
+                    <p class="text-sm mt-2">请输入股票代码开始查询</p>
+                </div>
+            `;
+            document.getElementById('chart').innerHTML = emptyStateHTML;
+        }
+
+        // 获取股票数据
+        async function fetchStockData(code) {
+            if (!code || code.length !== 6) {
+                throw new Error('请输入6位股票代码');
+            }
+
+            // 检查缓存
+            const cacheKey = `stock_${code}`;
+            const cachedData = State.dataCache.get(cacheKey);
+            if (cachedData && Date.now() - cachedData.timestamp < CONFIG.CACHE_DURATION) {
+                return cachedData.data;
+            }
+
+            try {
+                // 添加股票代码前缀
+                const fullCode = code.startsWith('6') ? `sh${code}` : `sz${code}`;
+                const response = await fetch(`${CONFIG.TENCENT_API_PREFIX}${fullCode}`);
+
+                if (!response.ok) {
+                    throw new Error('网络请求失败');
+                }
+
+                const buffer = await response.arrayBuffer();
+                // 使用 GBK 解码
+                const text = new TextDecoder('gbk').decode(buffer);
+                const data = parseTencentData(text, fullCode);
+
+                if (!data) {
+                    throw new Error('数据解析失败');
+                }
+
+                // 验证数据有效性
+                if (!validateStockData(data)) {
+                    throw new Error('数据验证失败');
+                }
+
+                // 更新缓存
+                State.dataCache.set(cacheKey, {
+                    data: data,
+                    timestamp: Date.now()
+                });
+
+                return data;
+            } catch (error) {
+                console.error('获取数据失败:', error);
+                // 重试机制
+                if (State.retryCount < CONFIG.RETRY_ATTEMPTS) {
+                    State.retryCount++;
+                    await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY));
+                    return fetchStockData(code);
+                }
+                throw error;
+            } finally {
+                State.retryCount = 0;
+            }
+        }
+
+        // 验证股票数据
+        function validateStockData(data) {
+            if (!data || typeof data !== 'object') return false;
+            
+            const requiredFields = ['name', 'price', 'change', 'trend', 'support', 'resistance', 'high', 'low', 'lastClose'];
+            for (const field of requiredFields) {
+                if (!(field in data)) return false;
+            }
+
+            // 验证数值字段
+            const numericFields = ['price', 'high', 'low', 'lastClose'];
+            for (const field of numericFields) {
+                if (isNaN(data[field]) || data[field] <= 0) return false;
+            }
+
+            // 验证涨跌幅格式
+            if (!data.change.endsWith('%')) return false;
+
+            return true;
+        }
+
+        // 解析腾讯数据
+        function parseTencentData(text, code) {
+            try {
+                // 移除 v_ 前缀，获取实际数据
+                const dataStr = text.replace(`v_${code}="`, '').replace('";', '');
+                const values = dataStr.split('~');
+
+                if (values.length < 40) {
+                    console.error('数据格式不正确:', values);
+                    return null;
+                }
+
+                const price = parseFloat(values[3]) || 0;
+                const lastClose = parseFloat(values[4]) || price;
+                const priceChange = ((price - lastClose) / lastClose * 100).toFixed(2);
+                const volume = parseInt(values[36]) || 0;
+                const amount = parseFloat(values[37]) || 0;
+
+                return {
+                    name: values[1] || '未知',
+                    price: price,
+                    change: priceChange + '%',
+                    trend: price > lastClose ? '上升趋势' : '下降趋势',
+                    support: (price * 0.98).toFixed(2),
+                    resistance: (price * 1.02).toFixed(2),
+                    high: parseFloat(values[33]) || price,
+                    low: parseFloat(values[34]) || price,
+                    turnover: values[38] || '0',
+                    lastClose: lastClose,
+                    volume: volume,
+                    amount: amount,
+                    volumeChange: ((volume - parseInt(values[35])) / parseInt(values[35]) * 100).toFixed(2) + '%'
+                };
+            } catch (error) {
+                console.error('解析数据出错:', error);
+                return null;
+            }
+        }
+
+        // 查询股票
+        async function searchStock() {
+            const code = document.getElementById('stockCode').value.trim();
+            if (!code || code.length !== 6) {
+                showError('请输入6位股票代码');
+                State.currentPrice = null;
+                State.currentChange = null;
+                updateTitle();
+                setLoadingState(false);
+                return;
+            }
+
+            try {
+                setLoadingState(true);
+                State.isLoading = true;
+                
+                // 如果切换了股票，重置图表
+                if (State.currentStockCode !== code) {
+                    // 清除之前的定时器
+                    if (State.refreshTimer) {
+                        clearInterval(State.refreshTimer);
+                    }
+                    if (State.titleBlinkInterval) {
+                        clearInterval(State.titleBlinkInterval);
+                    }
+                    if (State.changeBlinkInterval) {
+                        clearInterval(State.changeBlinkInterval);
+                    }
+                    
+                    // 重置图表
+                    if (State.chart) {
+                        State.chart.clear();
+                    }
+                    
+                    // 更新当前股票代码
+                    State.currentStockCode = code;
+                }
+
+                const stockData = await fetchStockData(code);
+
+                // 只在手动输入股票代码时添加到历史记录
+                if (document.getElementById('stockCode').value === code) {
+                    addToHistory(code, stockData.name);
+                }
+
+                await updateStockData();
+                // 设置默认刷新间隔为5秒
+                document.getElementById('refreshInterval').value = '5';
+                updateRefreshInterval();
+            } catch (error) {
+                console.error('查询失败:', error);
+                showError(error.message);
+                showEmptyState();
+            } finally {
+                setLoadingState(false);
+                State.isLoading = false;
+            }
+        }
+
+        // 设置加载状态
+        function setLoadingState(isLoading) {
+            const searchText = document.getElementById('searchText');
+            const searchSpinner = document.getElementById('searchSpinner');
+            const searchBtn = document.getElementById('searchBtn');
+            const stockCodeInput = document.getElementById('stockCode');
+
+            if (isLoading) {
+                searchText.textContent = '查询中...';
+                searchSpinner.classList.remove('hidden');
+                searchBtn.disabled = true;
+                searchBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                stockCodeInput.disabled = true;
+            } else {
+                searchText.textContent = '查询';
+                searchSpinner.classList.add('hidden');
+                searchBtn.disabled = stockCodeInput.value.length !== 6;
+                searchBtn.classList.toggle('opacity-50', stockCodeInput.value.length !== 6);
+                searchBtn.classList.toggle('cursor-not-allowed', stockCodeInput.value.length !== 6);
+                stockCodeInput.disabled = false;
+            }
+        }
+
+        // 更新股票数据
+        async function updateStockData() {
+            if (!State.currentStockCode) return;
+
+            try {
+                const stockData = await fetchStockData(State.currentStockCode);
+                updateStockInfo(stockData);
+                updateChart(stockData);
+                updateLastUpdateTime();
+            } catch (error) {
+                showError(error.message);
+                if (!State.isLoading) {
+                    showEmptyState();
+                }
+            }
+        }
+
+        // 检测短期价格变化
+        function checkShortTermPriceChange() {
+            if (!State.currentStockCode || !State.priceHistory[State.currentStockCode]) return null;
+            
+            const priceHistory = State.priceHistory[State.currentStockCode];
+            if (priceHistory.length < 2) return null;
+
+            const now = new Date();
+            const windowStart = new Date(now - CONFIG.SHORT_TERM_WINDOW * 60 * 1000);
+            
+            // 获取时间窗口内的价格数据
+            const windowPrices = priceHistory.filter(item => {
+                const itemTime = new Date(item.time);
+                return itemTime >= windowStart;
+            });
+
+            if (windowPrices.length < 2) return null;
+
+            // 计算价格变化百分比
+            const firstPrice = windowPrices[0].price;
+            const lastPrice = windowPrices[windowPrices.length - 1].price;
+            const changePercent = ((lastPrice - firstPrice) / firstPrice) * 100;
+
+            return {
+                change: changePercent,
+                isSignificant: Math.abs(changePercent) >= CONFIG.SHORT_TERM_THRESHOLD
+            };
+        }
+
+        // 更新股票信息显示
+        function updateStockInfo(data) {
+            try {
+                if (!data) {
+                    throw new Error('数据无效');
+                }
+
+                // 更新基本信息
+                document.getElementById('code').textContent = document.getElementById('stockCode').value;
+                document.getElementById('name').textContent = data.name;
+                document.getElementById('price').textContent = data.price.toFixed(2);
+                
+                // 更新价格提醒输入框的默认值
+                document.getElementById('alertValue').value = data.price.toFixed(2);
+                
+                // 更新涨跌幅显示
+                const changeElement = document.getElementById('change');
+                const changeValue = parseFloat(data.change);
+                changeElement.textContent = data.change;
+                
+                // 清除之前的闪烁效果
+                if (State.changeBlinkInterval) {
+                    clearInterval(State.changeBlinkInterval);
+                }
+                
+                // 移除之前的样式
+                changeElement.classList.remove('price-up', 'price-down', 'blink');
+                
+                // 添加新的样式
+                if (changeValue > 0) {
+                    changeElement.classList.add('price-up', 'blink');
+                } else if (changeValue < 0) {
+                    changeElement.classList.add('price-down', 'blink');
+                }
+
+                document.getElementById('trend').textContent = data.trend;
+                document.getElementById('support').textContent = data.support;
+                document.getElementById('resistance').textContent = data.resistance;
+                document.getElementById('high').textContent = data.high.toFixed(2);
+                document.getElementById('low').textContent = data.low.toFixed(2);
+                document.getElementById('lastClose').textContent = data.lastClose.toFixed(2);
+                document.getElementById('maxGain').textContent = ((data.high - data.lastClose) / data.lastClose * 100).toFixed(2) + '%';
+                document.getElementById('maxLoss').textContent = ((data.low - data.lastClose) / data.lastClose * 100).toFixed(2) + '%';
+
+                // 更新交易量信息
+                document.getElementById('volume').textContent = formatVolume(data.volume);
+                document.getElementById('amount').textContent = formatAmount(data.amount);
+                document.getElementById('turnover').textContent = data.turnover + '%';
+
+                // 更新当前价格和涨跌幅
+                State.currentPrice = data.price;
+                State.currentChange = data.change;
+
+                // 更新标题
+                updateTitle();
+
+                // 检查价格提醒
+                checkPriceAlerts(data);
+
+                // 检查涨速并触发买卖信号
+                checkPriceSpeed(data);
+
+                updateSignalDisplay(data);
+            } catch (error) {
+                console.error('更新股票信息出错:', error);
+                showError('更新股票信息失败：' + error.message);
+            }
+        }
+
+        // 更新标题
+        function updateTitle() {
+            if (!State.priceAlertBlinkInterval && !State.signalBlinkInterval) {
+                if (State.currentPrice && State.currentChange) {
+                    document.title = `${State.currentPrice.toFixed(2)} ${State.currentChange}`;
+                } else {
+                    document.title = "监控分析";
+                }
+            }
+        }
+
+        // 更新图表
+        function updateChart(data) {
+            if (!State.chart) {
+                State.chart = echarts.init(document.getElementById('chart'));
+            }
+
+            // 确保当前股票的价格历史数组存在
+            if (!State.priceHistory[State.currentStockCode]) {
+                State.priceHistory[State.currentStockCode] = [];
+            }
+
+            // 更新历史数据
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            State.priceHistory[State.currentStockCode].push({
+                time: timeStr,
+                price: data.price
+            });
+
+            // 限制历史数据点数
+            if (State.priceHistory[State.currentStockCode].length > CONFIG.MAX_HISTORY_POINTS) {
+                State.priceHistory[State.currentStockCode] = 
+                    State.priceHistory[State.currentStockCode].slice(-CONFIG.MAX_HISTORY_POINTS);
+            }
+
+            const option = {
+                title: {
+                    text: `${data.name} (${document.getElementById('stockCode').value}) 价格走势`,
+                    left: 'center',
+                    top: 10,
+                    textStyle: {
+                        fontSize: 16,
+                        fontWeight: 'normal'
+                    }
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: {
+                        type: 'cross',
+                        label: {
+                            backgroundColor: '#6a7985'
+                        }
+                    },
+                    formatter: function (params) {
+                        let result = params[0].axisValue + '<br/>';
+                        params.forEach(param => {
+                            result += `${param.seriesName}: ${param.value.toFixed(2)}<br/>`;
+                        });
+                        return result;
+                    }
+                },
+                legend: {
+                    data: ['实时价格'],
+                    bottom: 0,
+                    padding: [0, 0, 10, 0]
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '10%',
+                    top: '15%',
+                    containLabel: true
+                },
+                toolbox: {
+                    feature: {
+                        saveAsImage: {
+                            title: '保存图片'
+                        }
+                    },
+                    right: 10,
+                    top: 10
+                },
+                xAxis: {
+                    type: 'category',
+                    data: State.priceHistory[State.currentStockCode].map(item => item.time),
+                    axisLabel: {
+                        rotate: 45,
+                        interval: 'auto',
+                        formatter: function(value) {
+                            return value;
+                        }
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    scale: true,
+                    splitLine: {
+                        show: true,
+                        lineStyle: {
+                            type: 'dashed',
+                            color: '#E5E7EB'
+                        }
+                    },
+                    axisLabel: {
+                        formatter: function(value) {
+                            return value.toFixed(2);
+                        }
+                    }
+                },
+                series: [
+                    {
+                        name: '实时价格',
+                        type: 'line',
+                        data: State.priceHistory[State.currentStockCode].map(item => item.price),
+                        smooth: true,
+                        symbol: 'none',
+                        lineStyle: {
+                            width: 2,
+                            color: '#0EA5E9'
+                        },
+                        areaStyle: {
+                            opacity: 0.1,
+                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{
+                                offset: 0,
+                                color: '#0EA5E9'
+                            }, {
+                                offset: 1,
+                                color: 'rgba(14, 165, 233, 0.1)'
+                            }])
+                        }
+                    }
+                ]
+            };
+
+            State.chart.setOption(option);
+        }
+
+        // 更新最后更新时间
+        function updateLastUpdateTime() {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            const dateStr = now.toLocaleDateString();
+            document.getElementById('lastUpdate').textContent =
+                `最后更新时间：${dateStr} ${timeStr}`;
+        }
+
+        // 更新刷新间隔
+        function updateRefreshInterval() {
+            const interval = parseInt(document.getElementById('refreshInterval').value);
+
+            if (State.refreshTimer) {
+                clearInterval(State.refreshTimer);
+            }
+
+            if (interval > 0 && State.currentStockCode) {
+                State.refreshTimer = setInterval(updateStockData, interval * 1000);
+            }
+        }
+
+        // 生成交易信号
+        function generateTradeSignal(data) {
+            const signals = [];
+            const priceChange = parseFloat(data.change);
+            const currentPrice = data.price;
+
+            // 涨跌幅策略
+            if (priceChange > 2) {
+                signals.push({
+                    type: 'sell',
+                    strength: 'strong',
+                    reason: '日内涨幅过大(>' + priceChange.toFixed(2) + '%)',
+                    details: [
+                        '当前涨幅：' + priceChange.toFixed(2) + '%',
+                        '超过2%的涨幅阈值',
+                        '可能存在短期回调风险'
+                    ]
+                });
+            } else if (priceChange < -2) {
+                signals.push({
+                    type: 'buy',
+                    strength: 'strong',
+                    reason: '日内跌幅过大(<' + priceChange.toFixed(2) + '%)',
+                    details: [
+                        '当前跌幅：' + priceChange.toFixed(2) + '%',
+                        '超过2%的跌幅阈值',
+                        '可能存在超跌反弹机会'
+                    ]
+                });
+            }
+
+            // 价格位置策略
+            if (currentPrice > data.resistance) {
+                signals.push({
+                    type: 'sell',
+                    strength: 'medium',
+                    reason: '接近压力位',
+                    details: [
+                        '当前价格：' + currentPrice.toFixed(2),
+                        '压力位：' + data.resistance,
+                        '价格突破压力位，可能面临回调'
+                    ]
+                });
+            } else if (currentPrice < data.support) {
+                signals.push({
+                    type: 'buy',
+                    strength: 'medium',
+                    reason: '接近支撑位',
+                    details: [
+                        '当前价格：' + currentPrice.toFixed(2),
+                        '支撑位：' + data.support,
+                        '价格接近支撑位，可能存在反弹机会'
+                    ]
+                });
+            }
+
+            // 趋势策略
+            if (data.trend === '上升趋势') {
+                signals.push({
+                    type: 'buy',
+                    strength: 'weak',
+                    reason: '价格处于上升趋势',
+                    details: [
+                        '当前趋势：上升趋势',
+                        '均线呈多头排列',
+                        '建议关注回调买入机会'
+                    ]
+                });
+            } else {
+                signals.push({
+                    type: 'sell',
+                    strength: 'weak',
+                    reason: '价格处于下降趋势',
+                    details: [
+                        '当前趋势：下降趋势',
+                        '均线呈空头排列',
+                        '建议谨慎操作，等待企稳'
+                    ]
+                });
+            }
+
+            return signals;
+        }
+
+        // 更新信号显示
+        function updateSignalDisplay(data) {
+            const signals = generateTradeSignal(data);
+            const signalDiv = document.getElementById('signal');
+            signalDiv.className = 'signal mt-4 p-4 rounded-lg text-center font-medium';
+
+            if (signals.length === 0) {
+                signalDiv.textContent = '暂无明确信号 - 建议观望';
+                signalDiv.classList.add('hold');
+                return;
+            }
+
+            // 找出最强信号
+            const strongestSignal = signals.reduce((prev, curr) => {
+                const strengthMap = { strong: 3, medium: 2, weak: 1 };
+                return strengthMap[curr.strength] > strengthMap[prev.strength] ? curr : prev;
+            });
+
+            // 创建信号显示内容
+            let signalHTML = `
+                <div class="mb-2">
+                    <span class="text-lg font-bold">${strongestSignal.type === 'buy' ? '买入' : '卖出'}信号</span>
+                    <span class="text-xs ml-2 px-2 py-1 rounded ${strongestSignal.strength === 'strong' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                            strongestSignal.strength === 'medium' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' :
+                                'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
+                        }">
+                        ${strongestSignal.strength === 'strong' ? '强' : strongestSignal.strength === 'medium' ? '中' : '弱'}
+                    </span>
+                </div>
+                <div class="text-sm mb-2">原因：${strongestSignal.reason}</div>
+                <div class="text-xs text-left mt-2">
+                    <div class="font-semibold mb-1">详细分析：</div>
+                    <ul class="list-disc list-inside space-y-1">
+                        ${strongestSignal.details.map(detail => `<li>${detail}</li>`).join('')}
+                    </ul>
+                </div>
+            `;
+
+            signalDiv.innerHTML = signalHTML;
+            signalDiv.classList.add(strongestSignal.type === 'buy' ? 'buy' : 'sell');
+
+            // 修改信号提醒逻辑，只要不是弱信号就触发提醒
+            if (strongestSignal.strength !== 'weak') {
+                const stockName = document.getElementById('name').textContent;
+                const signalType = strongestSignal.type === 'buy' ? '买入' : '卖出';
+                const message = `${stockName}${signalType}${strongestSignal.strength === 'strong' ? '强' : '中'}`;
+                const details = `原因: ${strongestSignal.reason}`;
+                showAlert(message, details, 'signal');
+            }
+        }
+
+        // 显示提醒
+        function showAlert(message, details = null, type = 'price') {
+            // 如果已经有价格提醒在显示，则不显示买卖信号
+            if (type === 'signal' && State.priceAlertBlinkInterval) {
+                return;
+            }
+
+            // 播放系统提示音
+            try {
+                if (State.notificationPermission) {
+                    new Notification("价格提醒", {
+                        body: message,
+                        icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230ea5e9'%3E%3Cpath d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z'/%3E%3C/svg%3E",
+                        silent: false
+                    });
+                }
+            } catch (error) {
+                console.error('显示通知失败:', error);
+            }
+
+            // 根据类型选择对应的定时器和计数器
+            const intervalKey = type === 'price' ? 'priceAlertBlinkInterval' : 'signalBlinkInterval';
+            const countKey = type === 'price' ? 'priceAlertDisplayCount' : 'signalDisplayCount';
+            
+            // 清除可能存在的定时器
+            if (State[intervalKey]) {
+                clearInterval(State[intervalKey]);
+            }
+
+            // 重置计数器
+            State[countKey] = 0;
+            const maxDisplays = 6; // 总共显示6次（3次消息，3次详情）
+            let isOriginal = true;
+
+            // 保存原始标题
+            const originalTitle = document.title;
+            
+            // 立即显示第一次提醒
+            document.title = message;
+            
+            State[intervalKey] = setInterval(() => {
+                if (State[countKey] >= maxDisplays) {
+                    clearInterval(State[intervalKey]);
+                    State[intervalKey] = null;
+                    // 如果另一个提醒还在运行，不恢复标题
+                    if (!State.priceAlertBlinkInterval && !State.signalBlinkInterval) {
+                        document.title = originalTitle;
+                    }
+                    return;
+                }
+
+                if (details) {
+                    document.title = isOriginal ? message : details;
+                } else {
+                    document.title = isOriginal ? message : (State.currentPrice && State.currentChange ? 
+                        `${State.currentPrice.toFixed(2)} ${State.currentChange}` : State.originalTitle);
+                }
+                isOriginal = !isOriginal;
+                State[countKey]++;
+            }, 3000); // 每3秒切换一次
+
+            // 设置闪烁持续时间
+            setTimeout(() => {
+                clearInterval(State[intervalKey]);
+                State[intervalKey] = null;
+                // 如果另一个提醒还在运行，不恢复标题
+                if (!State.priceAlertBlinkInterval && !State.signalBlinkInterval) {
+                    document.title = originalTitle;
+                }
+            }, CONFIG.TITLE_BLINK_DURATION);
+        }
+
+        // 历史记录相关功能
+        function addToHistory(code, name) {
+            // 验证输入数据
+            if (!code || !name || name === '未知') {
+                console.warn('无效的股票数据:', { code, name });
+                return;
+            }
+
+            let history = JSON.parse(localStorage.getItem('stockHistory') || '[]');
+            // 清理无效数据
+            history = history.filter(item => item && item.code && item.name && item.name !== '未知');
+            // 移除已存在的相同代码
+            history = history.filter(item => item.code !== code);
+            // 添加到开头
+            history.unshift({ code: code, name: name });
+            // 限制历史记录数量为10个
+            if (history.length > CONFIG.MAX_HISTORY_RECORDS) {
+                history = history.slice(0, CONFIG.MAX_HISTORY_RECORDS);
+            }
+            localStorage.setItem('stockHistory', JSON.stringify(history));
+            updateHistorySelect();
+        }
+
+        function updateHistorySelect() {
+            const history = JSON.parse(localStorage.getItem('stockHistory') || '[]');
+            const select = document.getElementById('historyStocks');
+            const deleteBtn = document.getElementById('deleteHistory');
+
+            // 保存当前选中的值
+            const currentValue = select.value;
+
+            // 清理无效数据
+            const validHistory = history.filter(item => item && item.code && item.name && item.name !== '未知');
+
+            // 清除现有选项
+            select.innerHTML = '<option value="">历史记录</option>';
+
+            // 添加历史记录
+            validHistory.forEach(item => {
+                const option = document.createElement('option');
+                option.value = item.code;
+                option.textContent = `${item.code} - ${item.name}`;
+                select.appendChild(option);
+            });
+
+            // 恢复之前选中的值
+            if (currentValue) {
+                select.value = currentValue;
+            }
+
+            // 更新删除按钮显示状态
+            deleteBtn.style.display = select.value ? 'block' : 'none';
+
+            // 如果清理后的数据与原始数据不同，更新存储
+            if (validHistory.length !== history.length) {
+                localStorage.setItem('stockHistory', JSON.stringify(validHistory));
+            }
+        }
+
+        function selectHistoryStock() {
+            const select = document.getElementById('historyStocks');
+            const deleteBtn = document.getElementById('deleteHistory');
+            const code = select.value;
+            if (code) {
+                document.getElementById('stockCode').value = code;
+                deleteBtn.style.display = 'block';
+                searchStock();
+            } else {
+                deleteBtn.style.display = 'none';
+            }
+        }
+
+        function deleteHistoryStock() {
+            const select = document.getElementById('historyStocks');
+            const code = select.value;
+            if (!code) return;
+
+            if (confirm('确定要删除这条历史记录吗？')) {
+                let history = JSON.parse(localStorage.getItem('stockHistory') || '[]');
+                // 清理无效数据
+                history = history.filter(item => item && item.code && item.name);
+                history = history.filter(item => item.code !== code);
+                localStorage.setItem('stockHistory', JSON.stringify(history));
+                updateHistorySelect();
+                document.getElementById('stockCode').value = '';
+            }
+        }
+
+        // 检查价格提醒
+        function checkPriceAlerts(data) {
+            if (!State.currentStockCode || !State.priceAlerts.has(State.currentStockCode)) return;
+
+            const alert = State.priceAlerts.get(State.currentStockCode);
+            const currentPrice = data.price;
+            let triggered = false;
+            let message = '';
+            let details = '';
+
+            switch (alert.type) {
+                case CONFIG.PRICE_ALERT_TYPES.ABOVE:
+                    triggered = currentPrice > alert.value;
+                    message = `${currentPrice.toFixed(2)}高于${alert.value}`;
+                    details = `当前价格: ${currentPrice.toFixed(2)} 目标价: ${alert.value}`;
+                    break;
+                case CONFIG.PRICE_ALERT_TYPES.BELOW:
+                    triggered = currentPrice < alert.value;
+                    message = `${currentPrice.toFixed(2)}低于${alert.value}`;
+                    details = `当前价格: ${currentPrice.toFixed(2)} 目标价: ${alert.value}`;
+                    break;
+                case CONFIG.PRICE_ALERT_TYPES.CHANGE:
+                    const change = parseFloat(data.change);
+                    triggered = Math.abs(change) > alert.value;
+                    message = `${currentPrice.toFixed(2)}涨跌超${alert.value}%`;
+                    details = `当前涨跌幅: ${change.toFixed(2)}% 目标: ${alert.value}%`;
+                    break;
+            }
+
+            // 修改触发逻辑，每次满足条件都触发提醒
+            if (triggered) {
+                console.log('价格提醒触发:', message, details); // 添加调试日志
+                showAlert(message, details, 'price');
+            }
+        }
+
+        // 添加价格提醒
+        function addPriceAlert(type, value) {
+            if (!State.currentStockCode) {
+                showError('请先查询股票');
+                return;
+            }
+
+            if (!value || isNaN(value) || value <= 0) {
+                showError('请输入有效的提醒数值');
+                return;
+            }
+
+            const alert = {
+                type: type,
+                value: parseFloat(value),
+                triggered: false,
+                timestamp: Date.now()
+            };
+
+            State.priceAlerts.set(State.currentStockCode, alert);
+            // 显示设置的价格
+            document.getElementById('alertValue').value = value;
+            showError(`已设置${type === CONFIG.PRICE_ALERT_TYPES.ABOVE ? '高于' : type === CONFIG.PRICE_ALERT_TYPES.BELOW ? '低于' : '涨跌幅超过'} ${value}${type === CONFIG.PRICE_ALERT_TYPES.CHANGE ? '%' : ''} 的价格提醒`);
+        }
+
+        // 重置价格提醒
+        function resetPriceAlert() {
+            if (!State.currentStockCode) {
+                showError('请先查询股票');
+                return;
+            }
+
+            State.priceAlerts.delete(State.currentStockCode);
+            // 重置为当前股价
+            document.getElementById('alertValue').value = State.currentPrice ? State.currentPrice.toFixed(2) : '';
+            showError('已重置价格提醒');
+        }
+
+        // 调整价格提醒值
+        function adjustAlertValue(delta) {
+            const input = document.getElementById('alertValue');
+            const currentValue = parseFloat(input.value) || 0;
+            const newValue = (currentValue + delta).toFixed(2);
+            input.value = newValue;
+        }
+
+        // 格式化交易量
+        function formatVolume(volume) {
+            if (volume >= 100000000) {
+                return (volume / 100000000).toFixed(2) + '亿手';
+            } else if (volume >= 10000) {
+                return (volume / 10000).toFixed(2) + '万手';
+            }
+            return volume + '手';
+        }
+
+        // 格式化成交额
+        function formatAmount(amount) {
+            return (amount / 10000).toFixed(2) + '亿';
+        }
+
+        // 检查更新
+        function checkForUpdates() {
+            const now = Date.now();
+            if (State.lastUpdateCheck && now - State.lastUpdateCheck < CONFIG.UPDATE_CHECK_INTERVAL) {
+                return;
+            }
+            State.lastUpdateCheck = now;
+
+            // 从localStorage获取上次检查的版本
+            const lastVersion = localStorage.getItem('lastVersion');
+            if (lastVersion && lastVersion !== CONFIG.VERSION) {
+                showUpdateNotification(lastVersion);
+            }
+            localStorage.setItem('lastVersion', CONFIG.VERSION);
+        }
+
+        // 显示更新通知
+        function showUpdateNotification(lastVersion) {
+            const updateDiv = document.createElement('div');
+            updateDiv.className = 'fixed bottom-4 right-4 bg-primary-100 border border-primary-400 text-primary-700 px-4 py-3 rounded shadow-lg z-50 animate-fade-in';
+            updateDiv.innerHTML = `
+                <div class="flex items-center">
+                    <i class="fas fa-info-circle mr-2"></i>
+                    <span>系统已更新到新版本 ${CONFIG.VERSION}</span>
+                    <button onclick="showUpdateLog()" class="ml-2 text-primary-600 hover:text-primary-800">
+                        查看更新内容
+                    </button>
+                    <button onclick="this.parentElement.parentElement.remove()" class="ml-2 text-primary-600 hover:text-primary-800">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            `;
+            document.body.appendChild(updateDiv);
+        }
+
+        // 显示更新日志
+        function showUpdateLog() {
+            const logDiv = document.createElement('div');
+            logDiv.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+            logDiv.innerHTML = `
+                <div class="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200">更新日志</h3>
+                        <button onclick="this.parentElement.parentElement.parentElement.remove()" class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                    <div class="space-y-4">
+                        ${CONFIG.UPDATE_LOG.map(log => `
+                            <div class="border-b border-gray-200 dark:border-gray-700 pb-4">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="font-medium text-gray-800 dark:text-gray-200">版本 ${log.version}</span>
+                                    <span class="text-sm text-gray-500 dark:text-gray-400">${log.date}</span>
+                                </div>
+                                <ul class="list-disc list-inside text-sm text-gray-600 dark:text-gray-400 space-y-1">
+                                    ${log.changes.map(change => `<li>${change}</li>`).join('')}
+                                </ul>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(logDiv);
+        }
+
+        // 检查涨速并触发买卖信号
+        function checkPriceSpeed(data) {
+            if (!State.currentStockCode || !State.priceHistory[State.currentStockCode]) return;
+            
+            const priceHistory = State.priceHistory[State.currentStockCode];
+            if (priceHistory.length < 2) return;
+
+            const now = new Date();
+            const oneMinuteAgo = new Date(now - 60 * 1000);
+            
+            // 获取一分钟内的价格数据
+            const recentPrices = priceHistory.filter(item => {
+                const itemTime = new Date(item.time);
+                return itemTime >= oneMinuteAgo;
+            });
+
+            if (recentPrices.length < 2) return;
+
+            // 计算价格变化百分比
+            const firstPrice = recentPrices[0].price;
+            const lastPrice = recentPrices[recentPrices.length - 1].price;
+            const changePercent = ((lastPrice - firstPrice) / firstPrice) * 100;
+
+            // 如果涨速超过1%，触发买卖信号
+            if (Math.abs(changePercent) >= 1) {
+                const stockName = document.getElementById('name').textContent;
+                const message = `${stockName} ${changePercent > 0 ? '上涨' : '下跌'} ${Math.abs(changePercent).toFixed(2)}%`;
+                const details = `当前价格: ${lastPrice.toFixed(2)} 变化: ${changePercent.toFixed(2)}%`;
+                showAlert(message, details, 'signal');
+            }
+        }
+    </script>
+    <script>
+        // 配置Tailwind
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            200: '#bae6fd',
+                            300: '#7dd3fc',
+                            400: '#38bdf8',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                            800: '#075985',
+                            900: '#0c4a6e',
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['PingFang SC', 'Microsoft YaHei', 'system-ui', 'sans-serif'],
+                    },
+                    animation: {
+                        'fade-in': 'fadeIn 0.5s ease-in-out',
+                    },
+                    keyframes: {
+                        fadeIn: {
+                            '0%': { opacity: '0' },
+                            '100%': { opacity: '1' },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+            .signal {
+                transition: all 0.3s ease;
+            }
+            .buy {
+                background-color: rgba(16, 185, 129, 0.1);
+                border: 1px solid rgba(16, 185, 129, 0.5);
+                color: rgb(16, 185, 129);
+            }
+            .sell {
+                background-color: rgba(239, 68, 68, 0.1);
+                border: 1px solid rgba(239, 68, 68, 0.5);
+                color: rgb(239, 68, 68);
+            }
+            .hold {
+                background-color: rgba(156, 163, 175, 0.1);
+                border: 1px solid rgba(156, 163, 175, 0.5);
+                color: rgb(156, 163, 175);
+            }
+            .price-up {
+                color: rgb(239, 68, 68);
+                font-weight: 600;
+            }
+            .price-down {
+                color: rgb(16, 185, 129);
+                font-weight: 600;
+            }
+            @keyframes blink {
+                0% { opacity: 1; }
+                50% { opacity: 0.5; }
+                100% { opacity: 1; }
+            }
+            .blink {
+                animation: blink 1s infinite;
+            }
+        }
+    </style>
+</head>
+
+<body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200">
+    <div class="min-h-screen flex flex-col">
+        <!-- 顶部导航栏 -->
+        <nav class="bg-white dark:bg-gray-800 shadow-sm sticky top-0 z-50">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between h-16">
+                    <div class="flex items-center">
+                        <h1 class="text-xl font-semibold bg-gradient-to-r from-primary-600 to-primary-400 bg-clip-text text-transparent">
+                            监控分析
+                        </h1>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <button id="themeToggle" 
+                            class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
+                            <i class="fas fa-moon dark:hidden text-gray-600"></i>
+                            <i class="fas fa-sun hidden dark:block text-yellow-400"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <!-- 主要内容区域 -->
+        <main class="flex-grow w-4/5 mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <!-- 搜索区域 -->
+            <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mb-6 animate-fade-in card-hover">
+                <div class="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center">
+                    <div class="flex-1 w-full">
+                        <input type="text" id="stockCode"
+                            class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200"
+                            placeholder="输入股票代码（如：600519）" maxlength="6"
+                            inputmode="numeric" pattern="[0-9]*">
+                    </div>
+                    <div class="flex items-center gap-2 w-full sm:w-auto">
+                        <select id="historyStocks"
+                            class="w-full sm:w-auto px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200">
+                            <option value="">历史记录</option>
+                        </select>
+                        <button id="deleteHistory"
+                            class="hidden px-3 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors btn-hover">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                    <button id="searchBtn"
+                        class="w-full sm:w-auto px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors btn-hover flex items-center justify-center min-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed"
+                        type="button">
+                        <span id="searchText">查询</span>
+                        <span id="searchSpinner" class="hidden ml-2">
+                            <i class="fas fa-spinner fa-spin"></i>
+                        </span>
+                    </button>
+                    <div class="flex items-center gap-2 w-full sm:w-auto">
+                        <label class="text-sm text-gray-600 dark:text-gray-400 whitespace-nowrap">刷新间隔：</label>
+                        <select id="refreshInterval"
+                            class="w-full sm:w-auto px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200">
+                            <option value="0">手动刷新</option>
+                            <option value="3">3秒</option>
+                            <option value="5" selected>5秒</option>
+                            <option value="10">10秒</option>
+                            <option value="30">30秒</option>
+                            <option value="60">1分钟</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 股票信息卡片 -->
+            <div class="grid grid-cols-1 gap-6 mb-6">
+                <!-- 第一行：基本信息和量化分析 -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- 基本信息卡片 -->
+                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
+                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">基本信息</h3>
+                        <div class="space-y-3">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">股票代码：</span>
+                                <span id="code" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">股票名称：</span>
+                                <span id="name" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">当前价格：</span>
+                                <span id="price" class="font-medium price-up">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">日涨跌幅：</span>
+                                <span id="change" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">今日最高：</span>
+                                <span id="high" class="font-medium price-up">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">今日最低：</span>
+                                <span id="low" class="font-medium price-down">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">昨日收盘：</span>
+                                <span id="lastClose" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">最高涨幅：</span>
+                                <span id="maxGain" class="font-medium price-up">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">最低跌幅：</span>
+                                <span id="maxLoss" class="font-medium price-down">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">成交量：</span>
+                                <span id="volume" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">成交额：</span>
+                                <span id="amount" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">换手率：</span>
+                                <span id="turnover" class="font-medium">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 量化分析卡片 -->
+                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
+                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">量化分析</h3>
+                        <div class="space-y-3">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">趋势判断：</span>
+                                <span id="trend" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">支撑位：</span>
+                                <span id="support" class="font-medium">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600 dark:text-gray-400">压力位：</span>
+                                <span id="resistance" class="font-medium">-</span>
+                            </div>
+                            <div id="signal" class="signal mt-4 p-4 rounded-lg text-center font-medium">
+                                等待查询...
+                            </div>
+                            <!-- 价格提醒设置 -->
+                            <div class="mt-4 p-4 border border-gray-200 dark:border-gray-700 rounded-lg">
+                                <h4 class="text-sm font-medium mb-2">价格提醒设置</h4>
+                                <div class="flex flex-col space-y-2">
+                                    <div class="flex items-center space-x-2">
+                                        <select id="alertType" class="flex-1 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <option value="above">价格高于</option>
+                                            <option value="below">价格低于</option>
+                                            <option value="change">涨跌幅超过</option>
+                                        </select>
+                                        <input type="number" id="alertValue" step="0.01" class="w-24 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" placeholder="数值">
+                                        <button onclick="addPriceAlert(document.getElementById('alertType').value, document.getElementById('alertValue').value)" 
+                                                class="px-3 py-1 bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors">
+                                            设置
+                                        </button>
+                                        <button onclick="resetPriceAlert()" 
+                                                class="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors">
+                                            重置
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 第二行：图表区域 -->
+                <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
+                    <div id="chart" style="height: 500px; margin-bottom: 20px;"></div>
+                    <div id="lastUpdate" style="text-align: right; font-size: 0.875rem; color: #6B7280; margin-top: 8px;"></div>
+                </div>
+            </div>
+        </main>
+
+        <!-- 页脚 -->
+        <footer class="bg-white dark:bg-gray-800 mt-12">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <!-- 使用说明 -->
+                    <div>
+                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">使用说明</h3>
+                        <div class="space-y-4 text-sm text-gray-600 dark:text-gray-400">
+                            <div>
+                                <h4 class="font-medium mb-2">基本操作</h4>
+                                <ul class="list-disc list-inside space-y-1">
+                                    <li>输入6位股票代码（如：600519）</li>
+                                    <li>点击查询按钮或按回车键进行查询</li>
+                                    <li>使用刷新间隔选择器设置自动刷新频率</li>
+                                    <li>点击历史记录可以快速切换股票</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <h4 class="font-medium mb-2">快捷键</h4>
+                                <ul class="list-disc list-inside space-y-1">
+                                    <li>Enter：查询股票</li>
+                                    <li>R：刷新数据</li>
+                                    <li>Esc：清除数据</li>
+                                    <li>Ctrl + D：切换深色/浅色主题</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <h4 class="font-medium mb-2">价格提醒</h4>
+                                <ul class="list-disc list-inside space-y-1">
+                                    <li>设置价格高于/低于某个值时的提醒</li>
+                                    <li>设置涨跌幅超过某个百分比时的提醒</li>
+                                    <li>提醒会通过浏览器通知和页面标题闪烁显示</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 常见问题 -->
+                    <div>
+                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">常见问题</h3>
+                        <div class="space-y-4 text-sm text-gray-600 dark:text-gray-400">
+                            <div>
+                                <h4 class="font-medium mb-2">数据更新</h4>
+                                <ul class="list-disc list-inside space-y-1">
+                                    <li>数据来源：腾讯股票API</li>
+                                    <li>更新频率：实时（受网络延迟影响）</li>
+                                    <li>数据缓存：1分钟内的重复请求使用缓存数据</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <h4 class="font-medium mb-2">功能说明</h4>
+                                <ul class="list-disc list-inside space-y-1">
+                                    <li>图表支持缩放、平移、数据点查看</li>
+                                    <li>支持深色/浅色主题切换</li>
+                                    <li>支持历史记录管理（最多保存10条）</li>
+                                    <li>支持自定义价格提醒</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <h4 class="font-medium mb-2">注意事项</h4>
+                                <ul class="list-disc list-inside space-y-1">
+                                    <li>请确保浏览器允许通知权限</li>
+                                    <li>建议使用Chrome、Firefox等现代浏览器</li>
+                                    <li>数据仅供参考，不构成投资建议</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-8 pt-8 border-t border-gray-200 dark:border-gray-700">
+                    <div class="flex flex-col md:flex-row justify-between items-center">
+                        <div class="text-sm text-gray-500 dark:text-gray-400">
+                            © 2024 监控分析. All rights reserved.
+                        </div>
+                        <div class="flex items-center space-x-4 mt-4 md:mt-0">
+                            <span class="text-sm text-gray-500 dark:text-gray-400">作者：</span>
+                            <a href="https://twitter.com/your_twitter" target="_blank"
+                                class="text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition-colors">
+                                <i class="fab fa-twitter"></i>
+                            </a>
+                            <a href="https://github.com/your_github" target="_blank"
+                                class="text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition-colors">
+                                <i class="fab fa-github"></i>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </footer>
+    </div>
+</body>
+
+</html>
