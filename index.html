@@ -980,7 +980,7 @@
                     // 更新详情为最新的价格信息
                     const currentPrice = State.currentPrice ? State.currentPrice.toFixed(2) : '-';
                     const currentChange = State.currentChange || '-';
-                    const updatedDetails = `当前价格: ${currentPrice} 涨跌幅: ${currentChange}`;
+                    const updatedDetails = `${currentPrice} ${currentChange}`;
                     document.title = isOriginal ? message : updatedDetails;
                 } else {
                     document.title = isOriginal ? message : (State.currentPrice && State.currentChange ? 
