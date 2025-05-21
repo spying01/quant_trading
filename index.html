@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>监控分析</title>
+    <title>股票监控分析</title>
     <!-- 引入外部依赖 -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
@@ -37,6 +37,8 @@
             },
             VERSION: '1.0.0',                                  // 当前版本
             UPDATE_CHECK_INTERVAL: 86400000,                   // 版本检查间隔(ms)
+            ALERT_SOUND_URL: 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3', // 提醒音效URL
+            SERVICE_WORKER_PATH: '/sw.js',                     // Service Worker 路径
             UPDATE_LOG: [                                      // 更新日志
                 {
                     version: '1.0.0',
@@ -60,7 +62,7 @@
             priceHistory: {},              // 价格历史数据，按股票代码存储
             lastAlertTime: 0,              // 上次提醒时间
             titleBlinkInterval: null,       // 标题闪烁定时器
-            originalTitle: "监控分析",      // 原始标题
+            originalTitle: "股票监控分析",      // 原始标题
             currentPrice: null,             // 当前价格
             currentChange: null,            // 当前涨跌幅
             notificationPermission: false,  // 通知权限状态
@@ -77,16 +79,26 @@
             priceAlertBlinkInterval: null, // 价格提醒闪烁定时器
             signalBlinkInterval: null,     // 买卖信号闪烁定时器
             priceAlertDisplayCount: 0,     // 价格提醒显示计数
-            signalDisplayCount: 0          // 买卖信号显示计数
+            signalDisplayCount: 0,         // 买卖信号显示计数
+            alertSound: null,              // 提醒音效
+            isBackgroundRefreshEnabled: true, // 后台刷新开关
+            lastBackgroundCheck: null,      // 上次后台检查时间
+            serviceWorkerRegistration: null,    // Service Worker 注册实例
+            backgroundSyncSupported: false,     // 后台同步支持状态
+            permissionStatus: null,             // 权限状态
         };
 
         // DOM加载完成后初始化
-        document.addEventListener('DOMContentLoaded', () => {
+        document.addEventListener('DOMContentLoaded', async () => {
             initTheme();           // 初始化主题
             initEventListeners();  // 初始化事件监听
             updateHistorySelect(); // 更新历史记录选择器
             initKeyboardShortcuts(); // 初始化键盘快捷键
             checkForUpdates();     // 检查更新
+            initAlertSound();      // 初始化提醒音效
+            await initServiceWorker(); // 初始化 Service Worker
+            await checkAndRequestPermissions(); // 检查并请求权限
+            showPermissionStatus(); // 显示权限状态
             document.title = State.originalTitle;
         });
 
@@ -489,6 +501,59 @@
             }
         }
 
+        // 更新刷新间隔
+        function updateRefreshInterval() {
+            if (State.refreshTimer) {
+                clearInterval(State.refreshTimer);
+                State.refreshTimer = null;
+            }
+
+            const interval = parseInt(document.getElementById('refreshInterval').value);
+            if (interval > 0 && State.currentStockCode) {
+                // 立即执行一次更新
+                updateStockData();
+                
+                // 设置新的定时器
+                State.refreshTimer = setInterval(async () => {
+                    try {
+                        const stockData = await fetchStockData(State.currentStockCode);
+                        if (stockData) {
+                            // 更新股票信息
+                            updateStockInfo(stockData);
+                            // 更新图表
+                            updateChart(stockData);
+                            // 更新最后更新时间
+                            updateLastUpdateTime();
+                            // 更新标题
+                            updateTitle();
+                            // 检查价格提醒
+                            checkPriceAlerts(stockData);
+                            // 检查涨速
+                            checkPriceSpeed(stockData);
+                            // 更新信号显示
+                            updateSignalDisplay(stockData);
+                        }
+                    } catch (error) {
+                        console.error('定时更新失败:', error);
+                        showToast('数据更新失败: ' + error.message, 'error');
+                    }
+                }, interval * 1000);
+
+                // 如果支持后台同步，注册后台同步任务
+                if (State.backgroundSyncSupported && State.serviceWorkerRegistration) {
+                    try {
+                        State.serviceWorkerRegistration.sync.register('stockUpdate')
+                            .then(() => console.log('后台同步已注册'))
+                            .catch(error => {
+                                console.error('后台同步注册失败:', error);
+                            });
+                    } catch (error) {
+                        console.error('注册后台同步任务失败:', error);
+                    }
+                }
+            }
+        }
+
         // 更新股票数据
         async function updateStockData() {
             if (!State.currentStockCode) return;
@@ -519,9 +584,12 @@
                 
                 // 更新信号显示
                 updateSignalDisplay(stockData);
+
+                // 更新调试信息
+                updateDebugInfo();
             } catch (error) {
                 console.error('更新股票数据失败:', error);
-                showError(error.message);
+                showToast(error.message, 'error');
                 if (!State.isLoading) {
                     showEmptyState();
                 }
@@ -596,7 +664,7 @@
                 if (State.currentPrice && State.currentChange) {
                     document.title = `${State.currentPrice.toFixed(2)} ${State.currentChange}`;
                 } else {
-                    document.title = "监控分析";
+                    document.title = "股票监控分析";
                 }
             }
         }
@@ -735,42 +803,6 @@
             const dateStr = now.toLocaleDateString();
             document.getElementById('lastUpdate').textContent =
                 `最后更新时间：${dateStr} ${timeStr}`;
-        }
-
-        // 更新刷新间隔
-        function updateRefreshInterval() {
-            // 清除现有的定时器
-            if (State.refreshTimer) {
-                clearInterval(State.refreshTimer);
-                State.refreshTimer = null;
-            }
-
-            const interval = parseInt(document.getElementById('refreshInterval').value);
-            
-            if (interval > 0 && State.currentStockCode) {
-                // 立即执行一次更新
-                updateStockData();
-                
-                // 设置新的定时器
-                State.refreshTimer = setInterval(async () => {
-                    if (document.visibilityState === 'visible') {
-                        try {
-                            const stockData = await fetchStockData(State.currentStockCode);
-                            if (stockData) {
-                                updateStockInfo(stockData);
-                                updateChart(stockData);
-                                updateLastUpdateTime();
-                                updateTitle();
-                                checkPriceAlerts(stockData);
-                                checkPriceSpeed(stockData);
-                                updateSignalDisplay(stockData);
-                            }
-                        } catch (error) {
-                            console.error('定时更新失败:', error);
-                        }
-                    }
-                }, interval * 1000);
-            }
         }
 
         // 生成交易信号
@@ -943,6 +975,9 @@
 
         // 显示提醒
         function showAlert(message, details = null, type = 'price') {
+            // 播放提醒音效
+            playAlertSound();
+
             // 播放系统提示音
             try {
                 if (State.notificationPermission) {
@@ -975,33 +1010,31 @@
             // 立即显示第一次提醒
             document.title = message;
             
-            State[intervalKey] = setInterval(() => {
-                if (details) {
-                    // 更新详情为最新的价格信息
-                    const currentPrice = State.currentPrice ? State.currentPrice.toFixed(2) : '-';
-                    const currentChange = State.currentChange || '-';
-                    const updatedDetails = `${currentPrice} ${currentChange}`;
-                    document.title = isOriginal ? message : updatedDetails;
-                } else {
-                    document.title = isOriginal ? message : (State.currentPrice && State.currentChange ? 
-                        `${State.currentPrice.toFixed(2)} ${State.currentChange}` : State.originalTitle);
-                }
-                isOriginal = !isOriginal;
-                State[countKey]++;
-
-                // 每3秒播放一次提示音
-                if (State.notificationPermission) {
-                    try {
-                        new Notification("价格提醒", {
-                            body: message,
-                            icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230ea5e9'%3E%3Cpath d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z'/%3E%3C/svg%3E",
-                            silent: false
-                        });
-                    } catch (error) {
-                        console.error('显示通知失败:', error);
+            // 使用 requestAnimationFrame 来确保更精确的定时
+            let lastTime = performance.now();
+            const updateTitle = (currentTime) => {
+                if (currentTime - lastTime >= 3000) { // 每3秒切换一次
+                    if (details) {
+                        // 更新详情为最新的价格信息
+                        const currentPrice = State.currentPrice ? State.currentPrice.toFixed(2) : '-';
+                        const currentChange = State.currentChange || '-';
+                        const updatedDetails = `${currentPrice} ${currentChange}`;
+                        document.title = isOriginal ? message : updatedDetails;
+                    } else {
+                        document.title = isOriginal ? message : (State.currentPrice && State.currentChange ? 
+                            `${State.currentPrice.toFixed(2)} ${State.currentChange}` : State.originalTitle);
                     }
+                    isOriginal = !isOriginal;
+                    State[countKey]++;
+                    lastTime = currentTime;
+
+                    // 每3秒播放一次提示音
+                    playAlertSound();
                 }
-            }, 3000); // 每3秒切换一次
+                State[intervalKey] = requestAnimationFrame(updateTitle);
+            };
+
+            State[intervalKey] = requestAnimationFrame(updateTitle);
         }
 
         // 历史记录相关功能
@@ -1250,6 +1283,22 @@
             }
         }
 
+        // 初始化提醒音效
+        function initAlertSound() {
+            State.alertSound = new Audio(CONFIG.ALERT_SOUND_URL);
+            State.alertSound.load();
+        }
+
+        // 播放提醒音效
+        function playAlertSound() {
+            if (State.alertSound) {
+                State.alertSound.currentTime = 0;
+                State.alertSound.play().catch(error => {
+                    console.error('播放提醒音效失败:', error);
+                });
+            }
+        }
+
         // 添加页面可见性变化监听
         document.addEventListener('visibilitychange', function() {
             if (document.visibilityState === 'visible') {
@@ -1278,6 +1327,388 @@
                 clearInterval(State.signalBlinkInterval);
             }
         });
+
+        // 初始化 Service Worker
+        async function initServiceWorker() {
+            try {
+                if ('serviceWorker' in navigator) {
+                    // 确保在页面加载完成后注册 Service Worker
+                    if (document.readyState === 'complete') {
+                        const registration = await navigator.serviceWorker.register(CONFIG.SERVICE_WORKER_PATH, {
+                            scope: '/'
+                        });
+                        
+                        // 等待 Service Worker 激活
+                        await navigator.serviceWorker.ready;
+                        
+                        State.serviceWorkerRegistration = registration;
+                        console.log('Service Worker 注册成功:', registration);
+
+                        // 检查后台同步支持
+                        if ('sync' in registration) {
+                            State.backgroundSyncSupported = true;
+                            console.log('浏览器支持后台同步');
+                            showToast('后台同步已启用', 'success');
+                        } else {
+                            State.backgroundSyncSupported = false;
+                            console.log('浏览器不支持后台同步，将使用备用方案');
+                            showToast('使用备用同步方案', 'info');
+                        }
+
+                        // 监听 Service Worker 消息
+                        navigator.serviceWorker.addEventListener('message', (event) => {
+                            if (event.data && event.data.type === 'stockUpdate') {
+                                console.log('收到后台更新消息:', event.data);
+                                updateDebugInfo();
+                            }
+                        });
+
+                        // 监听 Service Worker 更新
+                        registration.addEventListener('updatefound', () => {
+                            const newWorker = registration.installing;
+                            newWorker.addEventListener('statechange', () => {
+                                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                    showToast('Service Worker 已更新', 'info');
+                                }
+                            });
+                        });
+                    } else {
+                        // 如果页面还未加载完成，等待加载完成后再注册
+                        window.addEventListener('load', initServiceWorker);
+                    }
+                } else {
+                    console.log('浏览器不支持 Service Worker');
+                    State.backgroundSyncSupported = false;
+                    showToast('浏览器不支持后台同步', 'warning');
+                }
+            } catch (error) {
+                console.error('Service Worker 注册失败:', error);
+                State.backgroundSyncSupported = false;
+                showToast('Service Worker 注册失败: ' + error.message, 'error');
+            }
+        }
+
+        // 检查并请求权限
+        async function checkAndRequestPermissions() {
+            try {
+                // 检查通知权限
+                if ('Notification' in window) {
+                    const permission = await Notification.requestPermission();
+                    State.notificationPermission = permission === 'granted';
+                    
+                    if (permission === 'granted') {
+                        showToast('通知权限已启用', 'success');
+                    } else {
+                        showToast('请允许通知权限以接收提醒', 'warning');
+                    }
+                }
+
+                // 检查后台同步权限
+                if ('permissions' in navigator) {
+                    try {
+                        const result = await navigator.permissions.query({ name: 'background-sync' });
+                        State.permissionStatus = result.state;
+                        
+                        if (result.state === 'granted') {
+                            showToast('后台同步已启用', 'success');
+                        } else if (result.state === 'prompt') {
+                            showToast('请允许后台同步以保持数据更新', 'warning');
+                        }
+                    } catch (error) {
+                        console.log('后台同步权限检查失败:', error);
+                    }
+                }
+            } catch (error) {
+                console.error('权限检查失败:', error);
+            }
+        }
+
+        // 显示权限状态提示
+        function showPermissionStatus() {
+            const statusDiv = document.createElement('div');
+            statusDiv.className = 'fixed bottom-0 left-0 right-0 sm:bottom-4 sm:left-4 sm:right-auto bg-white dark:bg-gray-800 shadow-lg z-50 transition-all duration-300 transform translate-y-[calc(100%-40px)] hover:translate-y-0';
+            statusDiv.innerHTML = `
+                <div class="flex items-center justify-between p-2 sm:p-4 border-b border-gray-200 dark:border-gray-700">
+                    <div class="flex items-center space-x-2">
+                        <i class="fas fa-info-circle text-primary-500"></i>
+                        <span class="text-sm font-medium">调试面板</span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <button onclick="toggleDebugPanel()" class="text-gray-500 hover:text-gray-700 p-1">
+                            <i class="fas fa-chevron-up"></i>
+                        </button>
+                        <button onclick="minimizeDebugPanel()" class="text-gray-500 hover:text-gray-700 p-1">
+                            <i class="fas fa-minus"></i>
+                        </button>
+                    </div>
+                </div>
+                <div id="debugPanel" class="p-2 sm:p-4 space-y-2 max-h-[80vh] overflow-y-auto">
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
+                        <div class="flex items-center space-x-2 p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                            <i class="fas ${State.notificationPermission ? 'fa-check text-green-500' : 'fa-times text-red-500'}"></i>
+                            <span>通知权限</span>
+                        </div>
+                        <div class="flex items-center space-x-2 p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                            <i class="fas ${State.backgroundSyncSupported ? 'fa-check text-green-500' : 'fa-times text-red-500'}"></i>
+                            <span>后台同步</span>
+                        </div>
+                        <div class="flex items-center space-x-2 p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                            <i class="fas ${State.serviceWorkerRegistration ? 'fa-check text-green-500' : 'fa-times text-red-500'}"></i>
+                            <span>Service Worker</span>
+                        </div>
+                        <div class="flex items-center space-x-2 p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                            <i class="fas ${State.refreshTimer ? 'fa-check text-green-500' : 'fa-times text-red-500'}"></i>
+                            <span>定时刷新</span>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs text-gray-500 bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                        <div>最后更新: <span id="lastUpdateTime" class="font-medium">-</span></div>
+                        <div>后台状态: <span id="backgroundStatus" class="font-medium">-</span></div>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2">
+                        <button onclick="checkAndRequestPermissions()" class="px-2 py-1 bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors text-xs">
+                            更新权限
+                        </button>
+                        <button onclick="testNotification()" class="px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700 transition-colors text-xs">
+                            测试通知
+                        </button>
+                        <button onclick="testBackgroundSync()" class="px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors text-xs">
+                            测试同步
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(statusDiv);
+            updateDebugInfo();
+        }
+
+        // 最小化调试面板
+        function minimizeDebugPanel() {
+            const panel = document.querySelector('.fixed.bottom-0');
+            if (panel) {
+                panel.classList.toggle('translate-y-[calc(100%-40px)]');
+            }
+        }
+
+        // 切换调试面板
+        function toggleDebugPanel() {
+            const panel = document.getElementById('debugPanel');
+            const button = document.querySelector('#debugPanel').parentElement.querySelector('button i');
+            
+            if (panel.style.display === 'none') {
+                panel.style.display = 'block';
+                button.classList.remove('fa-chevron-up');
+                button.classList.add('fa-chevron-down');
+            } else {
+                panel.style.display = 'none';
+                button.classList.remove('fa-chevron-down');
+                button.classList.add('fa-chevron-up');
+            }
+        }
+
+        // 更新调试信息
+        function updateDebugInfo() {
+            const lastUpdateTime = document.getElementById('lastUpdateTime');
+            const backgroundStatus = document.getElementById('backgroundStatus');
+            
+            if (lastUpdateTime) {
+                lastUpdateTime.textContent = new Date().toLocaleTimeString();
+            }
+            
+            if (backgroundStatus) {
+                backgroundStatus.textContent = State.backgroundSyncSupported ? 
+                    '支持后台同步' : 
+                    '使用备用方案';
+            }
+        }
+
+        // 添加响应式样式
+        const style = document.createElement('style');
+        style.textContent = `
+            @media (max-width: 640px) {
+                .fixed.bottom-0 {
+                    width: 100%;
+                    border-radius: 0;
+                }
+                
+                #debugPanel {
+                    max-height: 50vh;
+                }
+                
+                .grid-cols-2 {
+                    grid-template-columns: repeat(2, 1fr);
+                }
+            }
+            
+            @media (min-width: 641px) {
+                .fixed.bottom-0 {
+                    width: auto;
+                    border-radius: 0.5rem;
+                }
+                
+                #debugPanel {
+                    max-height: 80vh;
+                }
+                
+                .grid-cols-4 {
+                    grid-template-columns: repeat(4, 1fr);
+                }
+            }
+            
+            /* 添加触摸滑动支持 */
+            .fixed.bottom-0 {
+                touch-action: pan-y;
+                user-select: none;
+            }
+            
+            /* 优化移动设备上的按钮点击区域 */
+            button {
+                min-height: 44px;
+                min-width: 44px;
+            }
+            
+            /* 优化移动设备上的输入框 */
+            input, select {
+                font-size: 16px; /* 防止iOS自动缩放 */
+            }
+            
+            /* 优化移动设备上的滚动 */
+            .overflow-y-auto {
+                -webkit-overflow-scrolling: touch;
+            }
+        `;
+        document.head.appendChild(style);
+
+        // 添加触摸事件支持
+        let touchStartY = 0;
+        let touchEndY = 0;
+
+        document.addEventListener('touchstart', e => {
+            const panel = document.querySelector('.fixed.bottom-0');
+            if (panel && e.target.closest('.fixed.bottom-0')) {
+                touchStartY = e.touches[0].clientY;
+            }
+        }, { passive: true });
+
+        document.addEventListener('touchmove', e => {
+            const panel = document.querySelector('.fixed.bottom-0');
+            if (panel && e.target.closest('.fixed.bottom-0')) {
+                touchEndY = e.touches[0].clientY;
+                const diff = touchEndY - touchStartY;
+                
+                if (Math.abs(diff) > 10) {
+                    if (diff > 0) {
+                        panel.classList.add('translate-y-full');
+                        panel.classList.remove('translate-y-[calc(100%-40px)]');
+                    } else {
+                        panel.classList.remove('translate-y-full');
+                        panel.classList.add('translate-y-[calc(100%-40px)]');
+                    }
+                }
+            }
+        }, { passive: true });
+
+        // 测试通知功能
+        function testNotification() {
+            if (!State.notificationPermission) {
+                showToast('请先启用通知权限', 'warning');
+                return;
+            }
+
+            const notification = new Notification('测试通知', {
+                body: '这是一条测试通知消息',
+                icon: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%230ea5e9"%3E%3Cpath d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/%3E%3C/svg%3E'
+            });
+
+            notification.onclick = () => {
+                window.focus();
+                notification.close();
+            };
+        }
+
+        // 测试后台同步
+        async function testBackgroundSync() {
+            try {
+                // 检查 Service Worker 是否已注册
+                if (!State.serviceWorkerRegistration) {
+                    // 尝试重新注册 Service Worker
+                    await initServiceWorker();
+                    
+                    // 再次检查是否注册成功
+                    if (!State.serviceWorkerRegistration) {
+                        throw new Error('Service Worker 注册失败，请刷新页面重试');
+                    }
+                }
+
+                if (!State.backgroundSyncSupported) {
+                    // 使用备用方案
+                    console.log('使用备用同步方案');
+                    if (State.currentStockCode) {
+                        await fetchStockData(State.currentStockCode);
+                        showToast('数据已更新（使用备用方案）', 'success');
+                    } else {
+                        showToast('请先查询股票', 'warning');
+                    }
+                    return;
+                }
+
+                // 注册后台同步任务
+                await State.serviceWorkerRegistration.sync.register('stockUpdate');
+                showToast('后台同步已注册', 'success');
+                
+                // 添加测试通知
+                if (State.notificationPermission) {
+                    new Notification('后台同步测试', {
+                        body: '正在测试后台同步功能...',
+                        icon: '/favicon.ico'
+                    });
+                }
+            } catch (error) {
+                console.error('后台同步测试失败:', error);
+                showToast('后台同步测试失败: ' + error.message, 'error');
+                
+                // 如果后台同步失败，使用备用方案
+                if (State.currentStockCode) {
+                    await fetchStockData(State.currentStockCode);
+                    showToast('已使用备用方案更新数据', 'info');
+                }
+            }
+        }
+
+        // 定期更新调试信息
+        setInterval(updateDebugInfo, 1000);
+
+        // 监听页面可见性变化
+        document.addEventListener('visibilitychange', () => {
+            updateDebugInfo();
+            if (document.visibilityState === 'visible') {
+                showToast('页面已恢复可见', 'info');
+            } else {
+                showToast('页面已进入后台', 'info');
+            }
+        });
+
+        // 显示提示消息
+        function showToast(message, type = 'info') {
+            const toast = document.createElement('div');
+            toast.className = `fixed top-4 right-4 px-4 py-2 rounded-lg shadow-lg z-50 animate-fade-in ${
+                type === 'success' ? 'bg-green-100 text-green-800' :
+                type === 'warning' ? 'bg-yellow-100 text-yellow-800' :
+                'bg-blue-100 text-blue-800'
+            }`;
+            toast.innerHTML = `
+                <div class="flex items-center">
+                    <i class="fas ${
+                        type === 'success' ? 'fa-check-circle' :
+                        type === 'warning' ? 'fa-exclamation-circle' :
+                        'fa-info-circle'
+                    } mr-2"></i>
+                    <span>${message}</span>
+                </div>
+            `;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
     </script>
     <script>
         // 配置Tailwind
@@ -1297,6 +1728,30 @@
                             700: '#0369a1',
                             800: '#075985',
                             900: '#0c4a6e',
+                        },
+                        success: {
+                            50: '#f0fdf4',
+                            100: '#dcfce7',
+                            200: '#bbf7d0',
+                            300: '#86efac',
+                            400: '#4ade80',
+                            500: '#22c55e',
+                            600: '#16a34a',
+                            700: '#15803d',
+                            800: '#166534',
+                            900: '#14532d',
+                        },
+                        danger: {
+                            50: '#fef2f2',
+                            100: '#fee2e2',
+                            200: '#fecaca',
+                            300: '#fca5a5',
+                            400: '#f87171',
+                            500: '#ef4444',
+                            600: '#dc2626',
+                            700: '#b91c1c',
+                            800: '#991b1b',
+                            900: '#7f1d1d',
                         }
                     },
                     fontFamily: {
@@ -1304,11 +1759,27 @@
                     },
                     animation: {
                         'fade-in': 'fadeIn 0.5s ease-in-out',
+                        'slide-up': 'slideUp 0.5s ease-out',
+                        'slide-down': 'slideDown 0.5s ease-out',
+                        'bounce-in': 'bounceIn 0.5s ease-out',
                     },
                     keyframes: {
                         fadeIn: {
                             '0%': { opacity: '0' },
                             '100%': { opacity: '1' },
+                        },
+                        slideUp: {
+                            '0%': { transform: 'translateY(20px)', opacity: '0' },
+                            '100%': { transform: 'translateY(0)', opacity: '1' },
+                        },
+                        slideDown: {
+                            '0%': { transform: 'translateY(-20px)', opacity: '0' },
+                            '100%': { transform: 'translateY(0)', opacity: '1' },
+                        },
+                        bounceIn: {
+                            '0%': { transform: 'scale(0.95)', opacity: '0' },
+                            '50%': { transform: 'scale(1.05)' },
+                            '100%': { transform: 'scale(1)', opacity: '1' },
                         }
                     }
                 }
@@ -1354,6 +1825,19 @@
             .blink {
                 animation: blink 1s infinite;
             }
+            .card-hover {
+                transition: all 0.3s ease;
+            }
+            .card-hover:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            }
+            .btn-hover {
+                transition: all 0.2s ease;
+            }
+            .btn-hover:hover {
+                transform: scale(1.05);
+            }
         }
     </style>
 </head>
@@ -1366,7 +1850,7 @@
                 <div class="flex justify-between h-16">
                     <div class="flex items-center">
                         <h1 class="text-xl font-semibold bg-gradient-to-r from-primary-600 to-primary-400 bg-clip-text text-transparent">
-                            监控分析
+                            股票监控分析
                         </h1>
                     </div>
                     <div class="flex items-center space-x-4">
@@ -1381,19 +1865,19 @@
         </nav>
 
         <!-- 主要内容区域 -->
-        <main class="flex-grow w-4/5 mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <main class="flex-grow w-full sm:w-4/5 mx-auto px-2 sm:px-4 md:px-6 lg:px-8 py-4 sm:py-8">
             <!-- 搜索区域 -->
-            <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mb-6 animate-fade-in card-hover">
-                <div class="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center">
+            <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-3 sm:p-6 mb-4 sm:mb-6 animate-fade-in card-hover">
+                <div class="flex flex-col space-y-3 sm:space-y-0 sm:flex-row sm:gap-4 items-stretch sm:items-center">
                     <div class="flex-1 w-full">
                         <input type="text" id="stockCode"
-                            class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200"
+                            class="w-full px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200 text-base"
                             placeholder="输入股票代码（如：600519）" maxlength="6"
                             inputmode="numeric" pattern="[0-9]*">
                     </div>
                     <div class="flex items-center gap-2 w-full sm:w-auto">
                         <select id="historyStocks"
-                            class="w-full sm:w-auto px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200">
+                            class="w-full sm:w-auto px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200 text-base">
                             <option value="">历史记录</option>
                         </select>
                         <button id="deleteHistory"
@@ -1402,7 +1886,7 @@
                         </button>
                     </div>
                     <button id="searchBtn"
-                        class="w-full sm:w-auto px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors btn-hover flex items-center justify-center min-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed"
+                        class="w-full sm:w-auto px-4 sm:px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors btn-hover flex items-center justify-center min-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed text-base"
                         type="button">
                         <span id="searchText">查询</span>
                         <span id="searchSpinner" class="hidden ml-2">
@@ -1412,7 +1896,7 @@
                     <div class="flex items-center gap-2 w-full sm:w-auto">
                         <label class="text-sm text-gray-600 dark:text-gray-400 whitespace-nowrap">刷新间隔：</label>
                         <select id="refreshInterval"
-                            class="w-full sm:w-auto px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200">
+                            class="w-full sm:w-auto px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:bg-gray-700 transition-all duration-200 text-base">
                             <option value="0">手动刷新</option>
                             <option value="3">3秒</option>
                             <option value="5" selected>5秒</option>
@@ -1425,58 +1909,58 @@
             </div>
 
             <!-- 股票信息卡片 -->
-            <div class="grid grid-cols-1 gap-6 mb-6">
+            <div class="grid grid-cols-1 gap-4 sm:gap-6 mb-4 sm:mb-6">
                 <!-- 第一行：基本信息和量化分析 -->
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
                     <!-- 基本信息卡片 -->
-                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
-                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">基本信息</h3>
-                        <div class="space-y-3">
-                            <div class="flex justify-between">
+                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-3 sm:p-6 animate-fade-in card-hover">
+                        <h3 class="text-base sm:text-lg font-semibold mb-3 sm:mb-4 text-gray-800 dark:text-gray-200">基本信息</h3>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">股票代码：</span>
                                 <span id="code" class="font-medium">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">股票名称：</span>
                                 <span id="name" class="font-medium">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">当前价格：</span>
                                 <span id="price" class="font-medium price-up">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">日涨跌幅：</span>
                                 <span id="change" class="font-medium">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">今日最高：</span>
                                 <span id="high" class="font-medium price-up">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">今日最低：</span>
                                 <span id="low" class="font-medium price-down">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">昨日收盘：</span>
                                 <span id="lastClose" class="font-medium">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">最高涨幅：</span>
                                 <span id="maxGain" class="font-medium price-up">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">最低跌幅：</span>
                                 <span id="maxLoss" class="font-medium price-down">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">成交量：</span>
                                 <span id="volume" class="font-medium">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">成交额：</span>
                                 <span id="amount" class="font-medium">-</span>
                             </div>
-                            <div class="flex justify-between">
+                            <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                                 <span class="text-gray-600 dark:text-gray-400">换手率：</span>
                                 <span id="turnover" class="font-medium">-</span>
                             </div>
@@ -1484,43 +1968,47 @@
                     </div>
 
                     <!-- 量化分析卡片 -->
-                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
-                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">量化分析</h3>
+                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-3 sm:p-6 animate-fade-in card-hover">
+                        <h3 class="text-base sm:text-lg font-semibold mb-3 sm:mb-4 text-gray-800 dark:text-gray-200">量化分析</h3>
                         <div class="space-y-3">
-                            <div class="flex justify-between">
-                                <span class="text-gray-600 dark:text-gray-400">趋势判断：</span>
-                                <span id="trend" class="font-medium">-</span>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
+                                <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                                    <span class="text-gray-600 dark:text-gray-400">趋势判断：</span>
+                                    <span id="trend" class="font-medium">-</span>
+                                </div>
+                                <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                                    <span class="text-gray-600 dark:text-gray-400">支撑位：</span>
+                                    <span id="support" class="font-medium">-</span>
+                                </div>
+                                <div class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                                    <span class="text-gray-600 dark:text-gray-400">压力位：</span>
+                                    <span id="resistance" class="font-medium">-</span>
+                                </div>
                             </div>
-                            <div class="flex justify-between">
-                                <span class="text-gray-600 dark:text-gray-400">支撑位：</span>
-                                <span id="support" class="font-medium">-</span>
-                            </div>
-                            <div class="flex justify-between">
-                                <span class="text-gray-600 dark:text-gray-400">压力位：</span>
-                                <span id="resistance" class="font-medium">-</span>
-                            </div>
-                            <div id="signal" class="signal mt-4 p-4 rounded-lg text-center font-medium">
+                            <div id="signal" class="signal mt-4 p-3 sm:p-4 rounded-lg text-center font-medium">
                                 等待查询...
                             </div>
                             <!-- 价格提醒设置 -->
-                            <div class="mt-4 p-4 border border-gray-200 dark:border-gray-700 rounded-lg">
+                            <div class="mt-4 p-3 sm:p-4 border border-gray-200 dark:border-gray-700 rounded-lg">
                                 <h4 class="text-sm font-medium mb-2">价格提醒设置</h4>
                                 <div class="flex flex-col space-y-2">
-                                    <div class="flex items-center space-x-2">
-                                        <select id="alertType" class="flex-1 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                    <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                                        <select id="alertType" class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-base">
                                             <option value="above">价格高于</option>
                                             <option value="below">价格低于</option>
                                             <option value="change">涨跌幅超过</option>
                                         </select>
-                                        <input type="number" id="alertValue" step="0.01" class="w-24 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" placeholder="数值">
-                                        <button onclick="addPriceAlert(document.getElementById('alertType').value, document.getElementById('alertValue').value)" 
-                                                class="px-3 py-1 bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors">
-                                            设置
-                                        </button>
-                                        <button onclick="resetPriceAlert()" 
-                                                class="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors">
-                                            重置
-                                        </button>
+                                        <input type="number" id="alertValue" step="0.01" class="w-full sm:w-24 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-base" placeholder="数值">
+                                        <div class="flex gap-2">
+                                            <button onclick="addPriceAlert(document.getElementById('alertType').value, document.getElementById('alertValue').value)" 
+                                                    class="flex-1 px-3 py-2 bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors btn-hover text-base">
+                                                设置
+                                            </button>
+                                            <button onclick="resetPriceAlert()" 
+                                                    class="flex-1 px-3 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors btn-hover text-base">
+                                                重置
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -1529,20 +2017,20 @@
                 </div>
 
                 <!-- 第二行：图表区域 -->
-                <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 animate-fade-in card-hover">
-                    <div id="chart" style="height: 500px; margin-bottom: 20px;"></div>
-                    <div id="lastUpdate" style="text-align: right; font-size: 0.875rem; color: #6B7280; margin-top: 8px;"></div>
+                <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-3 sm:p-6 animate-fade-in card-hover">
+                    <div id="chart" class="w-full" style="height: 300px; sm:height: 400px; md:height: 500px;"></div>
+                    <div id="lastUpdate" class="text-right text-sm text-gray-500 mt-2"></div>
                 </div>
             </div>
         </main>
 
         <!-- 页脚 -->
-        <footer class="bg-white dark:bg-gray-800 mt-12">
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <footer class="bg-white dark:bg-gray-800 mt-8 sm:mt-12">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-8">
                     <!-- 使用说明 -->
                     <div>
-                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">使用说明</h3>
+                        <h3 class="text-base sm:text-lg font-semibold mb-3 sm:mb-4 text-gray-800 dark:text-gray-200">使用说明</h3>
                         <div class="space-y-4 text-sm text-gray-600 dark:text-gray-400">
                             <div>
                                 <h4 class="font-medium mb-2">基本操作</h4>
@@ -1562,20 +2050,12 @@
                                     <li>Ctrl + D：切换深色/浅色主题</li>
                                 </ul>
                             </div>
-                            <div>
-                                <h4 class="font-medium mb-2">价格提醒</h4>
-                                <ul class="list-disc list-inside space-y-1">
-                                    <li>设置价格高于/低于某个值时的提醒</li>
-                                    <li>设置涨跌幅超过某个百分比时的提醒</li>
-                                    <li>提醒会通过浏览器通知和页面标题闪烁显示</li>
-                                </ul>
-                            </div>
                         </div>
                     </div>
 
                     <!-- 常见问题 -->
                     <div>
-                        <h3 class="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">常见问题</h3>
+                        <h3 class="text-base sm:text-lg font-semibold mb-3 sm:mb-4 text-gray-800 dark:text-gray-200">常见问题</h3>
                         <div class="space-y-4 text-sm text-gray-600 dark:text-gray-400">
                             <div>
                                 <h4 class="font-medium mb-2">数据更新</h4>
@@ -1594,33 +2074,31 @@
                                     <li>支持自定义价格提醒</li>
                                 </ul>
                             </div>
-                            <div>
-                                <h4 class="font-medium mb-2">注意事项</h4>
-                                <ul class="list-disc list-inside space-y-1">
-                                    <li>请确保浏览器允许通知权限</li>
-                                    <li>建议使用Chrome、Firefox等现代浏览器</li>
-                                    <li>数据仅供参考，不构成投资建议</li>
-                                </ul>
-                            </div>
                         </div>
                     </div>
                 </div>
 
-                <div class="mt-8 pt-8 border-t border-gray-200 dark:border-gray-700">
-                    <div class="flex flex-col md:flex-row justify-between items-center">
+                <div class="mt-6 sm:mt-8 pt-4 sm:pt-6 border-t border-gray-200 dark:border-gray-700">
+                    <div class="flex flex-col sm:flex-row justify-between items-center gap-4">
                         <div class="text-sm text-gray-500 dark:text-gray-400">
-                            © 2024 监控分析. All rights reserved.
+                            © 2024 股票监控分析. All rights reserved.
                         </div>
-                        <div class="flex items-center space-x-4 mt-4 md:mt-0">
-                            <span class="text-sm text-gray-500 dark:text-gray-400">作者：</span>
-                            <a href="https://twitter.com/your_twitter" target="_blank"
-                                class="text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition-colors">
-                                <i class="fab fa-twitter"></i>
-                            </a>
-                            <a href="https://github.com/your_github" target="_blank"
-                                class="text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition-colors">
-                                <i class="fab fa-github"></i>
-                            </a>
+                        <div class="flex items-center space-x-4">
+                            <span class="text-sm text-gray-500 dark:text-gray-400">作者：spy</span>
+                            <div class="flex space-x-4">
+                                <a href="https://www.baidu.com" target="_blank"
+                                    class="text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition-colors">
+                                    <i class="fab fa-baidu"></i>
+                                </a>
+                                <a href="https://weibo.com" target="_blank"
+                                    class="text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition-colors">
+                                    <i class="fab fa-weibo"></i>
+                                </a>
+                                <a href="https://qq.com" target="_blank"
+                                    class="text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 transition-colors">
+                                    <i class="fab fa-qq"></i>
+                                </a>
+                            </div>
                         </div>
                     </div>
                 </div>
