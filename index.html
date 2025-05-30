@@ -98,7 +98,6 @@
             initAlertSound();      // 初始化提醒音效
             await initServiceWorker(); // 初始化 Service Worker
             await checkAndRequestPermissions(); // 检查并请求权限
-            showPermissionStatus(); // 显示权限状态
             document.title = State.originalTitle;
         });
 
@@ -535,7 +534,6 @@
                         }
                     } catch (error) {
                         console.error('定时更新失败:', error);
-                        showToast('数据更新失败: ' + error.message, 'error');
                     }
                 }, interval * 1000);
 
@@ -933,7 +931,16 @@
 
         // 检查价格提醒
         function checkPriceAlerts(data) {
-            if (!State.currentStockCode || !State.priceAlerts.has(State.currentStockCode)) return;
+            if (!State.currentStockCode || !State.priceAlerts.has(State.currentStockCode)) {
+                // 如果没有提醒条件，确保停止任何正在进行的提醒
+                if (State.priceAlertBlinkInterval) {
+                    clearInterval(State.priceAlertBlinkInterval);
+                    State.priceAlertBlinkInterval = null;
+                    State.priceAlertDisplayCount = 0;
+                    updateTitle();
+                }
+                return;
+            }
 
             const alert = State.priceAlerts.get(State.currentStockCode);
             const currentPrice = data.price;
@@ -1026,10 +1033,20 @@
                     }
                     isOriginal = !isOriginal;
                     State[countKey]++;
-                    lastTime = currentTime;
 
                     // 每3秒播放一次提示音
                     playAlertSound();
+
+                    // 如果提醒次数达到60次（3分钟），停止提醒
+                    if (State[countKey] >= 60) {
+                        cancelAnimationFrame(State[intervalKey]);
+                        State[intervalKey] = null;
+                        document.title = State.currentPrice && State.currentChange ? 
+                            `${State.currentPrice.toFixed(2)} ${State.currentChange}` : State.originalTitle;
+                        return;
+                    }
+
+                    lastTime = currentTime;
                 }
                 State[intervalKey] = requestAnimationFrame(updateTitle);
             };
@@ -1128,13 +1145,21 @@
         // 添加价格提醒
         function addPriceAlert(type, value) {
             if (!State.currentStockCode) {
-                showError('请先查询股票');
+                showToast('请先查询股票', 'warning');
                 return;
             }
 
             if (!value || isNaN(value) || value <= 0) {
-                showError('请输入有效的提醒数值');
+                showToast('请输入有效的提醒数值', 'warning');
                 return;
+            }
+
+            // 先清除现有的提醒
+            if (State.priceAlertBlinkInterval) {
+                clearInterval(State.priceAlertBlinkInterval);
+                State.priceAlertBlinkInterval = null;
+                State.priceAlertDisplayCount = 0;
+                updateTitle();
             }
 
             const alert = {
@@ -1147,20 +1172,26 @@
             State.priceAlerts.set(State.currentStockCode, alert);
             // 显示设置的价格
             document.getElementById('alertValue').value = value;
-            showError(`已设置${type === CONFIG.PRICE_ALERT_TYPES.ABOVE ? '高于' : type === CONFIG.PRICE_ALERT_TYPES.BELOW ? '低于' : '涨跌幅超过'} ${value}${type === CONFIG.PRICE_ALERT_TYPES.CHANGE ? '%' : ''} 的价格提醒`);
+            showToast(`已设置${type === CONFIG.PRICE_ALERT_TYPES.ABOVE ? '高于' : type === CONFIG.PRICE_ALERT_TYPES.BELOW ? '低于' : '涨跌幅超过'} ${value}${type === CONFIG.PRICE_ALERT_TYPES.CHANGE ? '%' : ''} 的价格提醒`, 'success');
         }
 
         // 重置价格提醒
         function resetPriceAlert() {
-            if (!State.currentStockCode) {
-                showError('请先查询股票');
-                return;
+            // 清除所有提醒条件
+            State.priceAlerts.clear();
+            // 清除提醒状态
+            if (State.priceAlertBlinkInterval) {
+                clearInterval(State.priceAlertBlinkInterval);
+                State.priceAlertBlinkInterval = null;
+                State.priceAlertDisplayCount = 0;
             }
-
-            State.priceAlerts.delete(State.currentStockCode);
-            // 重置为当前股价
-            document.getElementById('alertValue').value = State.currentPrice ? State.currentPrice.toFixed(2) : '';
-            showError('已重置价格提醒');
+            // 重置输入框
+            document.getElementById('alertValue').value = '';
+            document.getElementById('alertType').value = 'above';
+            // 更新标题
+            updateTitle();
+            // 显示重置成功提示
+            showToast('价格提醒已重置', 'success');
         }
 
         // 调整价格提醒值
@@ -1348,18 +1379,18 @@
                         if ('sync' in registration) {
                             State.backgroundSyncSupported = true;
                             console.log('浏览器支持后台同步');
-                            showToast('后台同步已启用', 'success');
                         } else {
                             State.backgroundSyncSupported = false;
                             console.log('浏览器不支持后台同步，将使用备用方案');
-                            showToast('使用备用同步方案', 'info');
                         }
 
                         // 监听 Service Worker 消息
                         navigator.serviceWorker.addEventListener('message', (event) => {
                             if (event.data && event.data.type === 'stockUpdate') {
                                 console.log('收到后台更新消息:', event.data);
-                                updateDebugInfo();
+                                if (State.currentStockCode) {
+                                    updateStockData();
+                                }
                             }
                         });
 
@@ -1368,7 +1399,7 @@
                             const newWorker = registration.installing;
                             newWorker.addEventListener('statechange', () => {
                                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                                    showToast('Service Worker 已更新', 'info');
+                                    console.log('Service Worker 已更新');
                                 }
                             });
                         });
@@ -1379,12 +1410,10 @@
                 } else {
                     console.log('浏览器不支持 Service Worker');
                     State.backgroundSyncSupported = false;
-                    showToast('浏览器不支持后台同步', 'warning');
                 }
             } catch (error) {
                 console.error('Service Worker 注册失败:', error);
                 State.backgroundSyncSupported = false;
-                showToast('Service Worker 注册失败: ' + error.message, 'error');
             }
         }
 
@@ -1395,12 +1424,6 @@
                 if ('Notification' in window) {
                     const permission = await Notification.requestPermission();
                     State.notificationPermission = permission === 'granted';
-                    
-                    if (permission === 'granted') {
-                        showToast('通知权限已启用', 'success');
-                    } else {
-                        showToast('请允许通知权限以接收提醒', 'warning');
-                    }
                 }
 
                 // 检查后台同步权限
@@ -1408,101 +1431,12 @@
                     try {
                         const result = await navigator.permissions.query({ name: 'background-sync' });
                         State.permissionStatus = result.state;
-                        
-                        if (result.state === 'granted') {
-                            showToast('后台同步已启用', 'success');
-                        } else if (result.state === 'prompt') {
-                            showToast('请允许后台同步以保持数据更新', 'warning');
-                        }
                     } catch (error) {
                         console.log('后台同步权限检查失败:', error);
                     }
                 }
             } catch (error) {
                 console.error('权限检查失败:', error);
-            }
-        }
-
-        // 显示权限状态提示
-        function showPermissionStatus() {
-            const statusDiv = document.createElement('div');
-            statusDiv.className = 'fixed bottom-0 left-0 right-0 sm:bottom-4 sm:left-4 sm:right-auto bg-white dark:bg-gray-800 shadow-lg z-50 transition-all duration-300 transform translate-y-[calc(100%-40px)] hover:translate-y-0';
-            statusDiv.innerHTML = `
-                <div class="flex items-center justify-between p-2 sm:p-4 border-b border-gray-200 dark:border-gray-700">
-                    <div class="flex items-center space-x-2">
-                        <i class="fas fa-info-circle text-primary-500"></i>
-                        <span class="text-sm font-medium">调试面板</span>
-                    </div>
-                    <div class="flex items-center space-x-2">
-                        <button onclick="toggleDebugPanel()" class="text-gray-500 hover:text-gray-700 p-1">
-                            <i class="fas fa-chevron-up"></i>
-                        </button>
-                        <button onclick="minimizeDebugPanel()" class="text-gray-500 hover:text-gray-700 p-1">
-                            <i class="fas fa-minus"></i>
-                        </button>
-                    </div>
-                </div>
-                <div id="debugPanel" class="p-2 sm:p-4 space-y-2 max-h-[80vh] overflow-y-auto">
-                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
-                        <div class="flex items-center space-x-2 p-2 bg-gray-50 dark:bg-gray-700 rounded">
-                            <i class="fas ${State.notificationPermission ? 'fa-check text-green-500' : 'fa-times text-red-500'}"></i>
-                            <span>通知权限</span>
-                        </div>
-                        <div class="flex items-center space-x-2 p-2 bg-gray-50 dark:bg-gray-700 rounded">
-                            <i class="fas ${State.backgroundSyncSupported ? 'fa-check text-green-500' : 'fa-times text-red-500'}"></i>
-                            <span>后台同步</span>
-                        </div>
-                        <div class="flex items-center space-x-2 p-2 bg-gray-50 dark:bg-gray-700 rounded">
-                            <i class="fas ${State.serviceWorkerRegistration ? 'fa-check text-green-500' : 'fa-times text-red-500'}"></i>
-                            <span>Service Worker</span>
-                        </div>
-                        <div class="flex items-center space-x-2 p-2 bg-gray-50 dark:bg-gray-700 rounded">
-                            <i class="fas ${State.refreshTimer ? 'fa-check text-green-500' : 'fa-times text-red-500'}"></i>
-                            <span>定时刷新</span>
-                        </div>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2 text-xs text-gray-500 bg-gray-50 dark:bg-gray-700 p-2 rounded">
-                        <div>最后更新: <span id="lastUpdateTime" class="font-medium">-</span></div>
-                        <div>后台状态: <span id="backgroundStatus" class="font-medium">-</span></div>
-                    </div>
-                    <div class="grid grid-cols-3 gap-2">
-                        <button onclick="checkAndRequestPermissions()" class="px-2 py-1 bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors text-xs">
-                            更新权限
-                        </button>
-                        <button onclick="testNotification()" class="px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700 transition-colors text-xs">
-                            测试通知
-                        </button>
-                        <button onclick="testBackgroundSync()" class="px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors text-xs">
-                            测试同步
-                        </button>
-                    </div>
-                </div>
-            `;
-            document.body.appendChild(statusDiv);
-            updateDebugInfo();
-        }
-
-        // 最小化调试面板
-        function minimizeDebugPanel() {
-            const panel = document.querySelector('.fixed.bottom-0');
-            if (panel) {
-                panel.classList.toggle('translate-y-[calc(100%-40px)]');
-            }
-        }
-
-        // 切换调试面板
-        function toggleDebugPanel() {
-            const panel = document.getElementById('debugPanel');
-            const button = document.querySelector('#debugPanel').parentElement.querySelector('button i');
-            
-            if (panel.style.display === 'none') {
-                panel.style.display = 'block';
-                button.classList.remove('fa-chevron-up');
-                button.classList.add('fa-chevron-down');
-            } else {
-                panel.style.display = 'none';
-                button.classList.remove('fa-chevron-down');
-                button.classList.add('fa-chevron-up');
             }
         }
 
