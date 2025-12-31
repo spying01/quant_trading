@@ -185,18 +185,6 @@
                 }, 200);
             });
 
-            // 页面关闭时清除定时器
-            window.addEventListener('beforeunload', function () {
-                if (State.refreshTimer) {
-                    clearInterval(State.refreshTimer);
-                }
-                if (State.titleBlinkInterval) {
-                    clearInterval(State.titleBlinkInterval);
-                }
-                if (State.changeBlinkInterval) {
-                    clearInterval(State.changeBlinkInterval);
-                }
-            });
 
             // 价格提醒输入框回车事件
             document.getElementById('alertValue').addEventListener('keypress', function(e) {
@@ -249,23 +237,64 @@
 
         // 清除所有数据
         function clearAllData() {
+            // 清除所有定时器
+            if (State.refreshTimer) {
+                clearInterval(State.refreshTimer);
+                State.refreshTimer = null;
+            }
+            if (State.priceAlertBlinkInterval) {
+                cancelAnimationFrame(State.priceAlertBlinkInterval);
+                State.priceAlertBlinkInterval = null;
+                State.priceAlertDisplayCount = 0;
+            }
+            if (State.signalBlinkInterval) {
+                cancelAnimationFrame(State.signalBlinkInterval);
+                State.signalBlinkInterval = null;
+                State.signalDisplayCount = 0;
+            }
+            
+            // 清除提醒条件
+            State.priceAlerts.clear();
+            
+            // 清除状态
             State.currentStockCode = null;
             State.currentPrice = null;
             State.currentChange = null;
             document.getElementById('stockCode').value = '';
+            
+            // 清除图表
             if (State.chart) {
                 State.chart.clear();
             }
+            
+            // 重置显示
             resetDisplay();
         }
 
         // 重置显示
         function resetDisplay() {
-            const elements = ['code', 'name', 'price', 'change', 'trend', 'support', 'resistance', 'high', 'low', 'lastClose', 'maxGain', 'maxLoss'];
+            const elements = ['code', 'name', 'price', 'change', 'trend', 'support', 'resistance', 'high', 'low', 'lastClose', 'maxGain', 'maxLoss', 'volume', 'amount', 'turnover'];
             elements.forEach(id => {
-                document.getElementById(id).textContent = '-';
+                const element = document.getElementById(id);
+                if (element) {
+                    element.textContent = '-';
+                }
             });
-            document.getElementById('signal').innerHTML = '等待查询...';
+            
+            // 重置信号显示
+            const signalDiv = document.getElementById('signal');
+            if (signalDiv) {
+                signalDiv.innerHTML = '等待查询...';
+                signalDiv.className = 'signal mt-4 p-4 rounded-lg text-center font-medium';
+                signalDiv.classList.remove('buy', 'sell', 'hold');
+            }
+            
+            // 清除涨跌幅样式
+            const changeElement = document.getElementById('change');
+            if (changeElement) {
+                changeElement.classList.remove('price-up', 'price-down', 'blink');
+            }
+            
             document.getElementById('lastUpdate').textContent = '';
             updateTitle();
         }
@@ -377,9 +406,13 @@
 
                 const price = parseFloat(values[3]) || 0;
                 const lastClose = parseFloat(values[4]) || price;
-                const priceChange = ((price - lastClose) / lastClose * 100).toFixed(2);
+                // 避免除零错误
+                const priceChange = lastClose > 0 ? ((price - lastClose) / lastClose * 100).toFixed(2) : '0.00';
                 const volume = parseInt(values[36]) || 0;
                 const amount = parseFloat(values[37]) || 0;
+                const prevVolume = parseInt(values[35]) || volume;
+                // 避免除零错误
+                const volumeChange = prevVolume > 0 ? ((volume - prevVolume) / prevVolume * 100).toFixed(2) : '0.00';
 
                 return {
                     name: values[1] || '未知',
@@ -394,7 +427,7 @@
                     lastClose: lastClose,
                     volume: volume,
                     amount: amount,
-                    volumeChange: ((volume - parseInt(values[35])) / parseInt(values[35]) * 100).toFixed(2) + '%'
+                    volumeChange: volumeChange + '%'
                 };
             } catch (error) {
                 console.error('解析数据出错:', error);
@@ -434,11 +467,11 @@
                         State.changeBlinkInterval = null;
                     }
                     if (State.priceAlertBlinkInterval) {
-                        clearInterval(State.priceAlertBlinkInterval);
+                        cancelAnimationFrame(State.priceAlertBlinkInterval);
                         State.priceAlertBlinkInterval = null;
                     }
                     if (State.signalBlinkInterval) {
-                        clearInterval(State.signalBlinkInterval);
+                        cancelAnimationFrame(State.signalBlinkInterval);
                         State.signalBlinkInterval = null;
                     }
                     
@@ -617,6 +650,7 @@
                 // 清除之前的闪烁效果
                 if (State.changeBlinkInterval) {
                     clearInterval(State.changeBlinkInterval);
+                    State.changeBlinkInterval = null;
                 }
                 
                 // 移除之前的样式
@@ -891,6 +925,10 @@
         function updateSignalDisplay(data) {
             const signals = generateTradeSignal(data);
             const signalDiv = document.getElementById('signal');
+            if (!signalDiv) return;
+            
+            // 清除之前的样式类
+            signalDiv.classList.remove('buy', 'sell', 'hold');
             signalDiv.className = 'signal mt-4 p-4 rounded-lg text-center font-medium';
 
             if (signals.length === 0) {
@@ -934,7 +972,7 @@
             if (!State.currentStockCode || !State.priceAlerts.has(State.currentStockCode)) {
                 // 如果没有提醒条件，确保停止任何正在进行的提醒
                 if (State.priceAlertBlinkInterval) {
-                    clearInterval(State.priceAlertBlinkInterval);
+                    cancelAnimationFrame(State.priceAlertBlinkInterval);
                     State.priceAlertBlinkInterval = null;
                     State.priceAlertDisplayCount = 0;
                     updateTitle();
@@ -973,7 +1011,7 @@
             }
             // 如果条件不满足且有正在运行的提醒，则停止提醒
             else if (!triggered && State.priceAlertBlinkInterval) {
-                clearInterval(State.priceAlertBlinkInterval);
+                cancelAnimationFrame(State.priceAlertBlinkInterval);
                 State.priceAlertBlinkInterval = null;
                 State.priceAlertDisplayCount = 0;
                 updateTitle();
@@ -1002,9 +1040,9 @@
             const intervalKey = type === 'price' ? 'priceAlertBlinkInterval' : 'signalBlinkInterval';
             const countKey = type === 'price' ? 'priceAlertDisplayCount' : 'signalDisplayCount';
             
-            // 清除可能存在的定时器
+            // 清除可能存在的定时器（使用 cancelAnimationFrame）
             if (State[intervalKey]) {
-                clearInterval(State[intervalKey]);
+                cancelAnimationFrame(State[intervalKey]);
             }
 
             // 重置计数器
@@ -1156,7 +1194,7 @@
 
             // 先清除现有的提醒
             if (State.priceAlertBlinkInterval) {
-                clearInterval(State.priceAlertBlinkInterval);
+                cancelAnimationFrame(State.priceAlertBlinkInterval);
                 State.priceAlertBlinkInterval = null;
                 State.priceAlertDisplayCount = 0;
                 updateTitle();
@@ -1179,11 +1217,17 @@
         function resetPriceAlert() {
             // 清除所有提醒条件
             State.priceAlerts.clear();
-            // 清除提醒状态
+            // 清除价格提醒状态（使用 cancelAnimationFrame）
             if (State.priceAlertBlinkInterval) {
-                clearInterval(State.priceAlertBlinkInterval);
+                cancelAnimationFrame(State.priceAlertBlinkInterval);
                 State.priceAlertBlinkInterval = null;
                 State.priceAlertDisplayCount = 0;
+            }
+            // 清除信号提醒状态（使用 cancelAnimationFrame）
+            if (State.signalBlinkInterval) {
+                cancelAnimationFrame(State.signalBlinkInterval);
+                State.signalBlinkInterval = null;
+                State.signalDisplayCount = 0;
             }
             // 重置输入框
             document.getElementById('alertValue').value = '';
@@ -1289,24 +1333,27 @@
             const priceHistory = State.priceHistory[State.currentStockCode];
             if (priceHistory.length < 2) return;
 
-            const now = new Date();
-            const oneMinuteAgo = new Date(now - 60 * 1000);
+            const now = Date.now();
+            const oneMinuteAgo = now - 60 * 1000;
             
-            // 获取一分钟内的价格数据
-            const recentPrices = priceHistory.filter(item => {
-                const itemTime = new Date(item.time);
-                return itemTime >= oneMinuteAgo;
-            });
+            // 获取最近一分钟内的价格数据（使用数组索引，因为数据是按时间顺序添加的）
+            // 只检查最后几个数据点，避免遍历整个数组
+            const recentCount = Math.min(priceHistory.length, 10);
+            const recentPrices = priceHistory.slice(-recentCount);
 
             if (recentPrices.length < 2) return;
 
-            // 计算价格变化百分比
+            // 计算价格变化百分比（使用第一个和最后一个价格）
             const firstPrice = recentPrices[0].price;
             const lastPrice = recentPrices[recentPrices.length - 1].price;
+            
+            // 避免除零错误
+            if (firstPrice <= 0) return;
+            
             const changePercent = ((lastPrice - firstPrice) / firstPrice) * 100;
 
-            // 如果涨速超过1%，触发买卖信号
-            if (Math.abs(changePercent) >= 1) {
+            // 如果涨速超过1%且没有正在运行的信号提醒，触发买卖信号
+            if (Math.abs(changePercent) >= 1 && !State.signalBlinkInterval) {
                 const stockName = document.getElementById('name').textContent;
                 const message = `${stockName} ${changePercent > 0 ? '上涨' : '下跌'} ${Math.abs(changePercent).toFixed(2)}%`;
                 const details = `当前价格: ${lastPrice.toFixed(2)} 变化: ${changePercent.toFixed(2)}%`;
@@ -1330,15 +1377,6 @@
             }
         }
 
-        // 添加页面可见性变化监听
-        document.addEventListener('visibilitychange', function() {
-            if (document.visibilityState === 'visible') {
-                // 页面变为可见时，立即更新数据
-                if (State.currentStockCode) {
-                    updateStockData();
-                }
-            }
-        });
 
         // 在页面关闭时清理所有定时器
         window.addEventListener('beforeunload', function() {
@@ -1352,10 +1390,20 @@
                 clearInterval(State.changeBlinkInterval);
             }
             if (State.priceAlertBlinkInterval) {
-                clearInterval(State.priceAlertBlinkInterval);
+                cancelAnimationFrame(State.priceAlertBlinkInterval);
             }
             if (State.signalBlinkInterval) {
-                clearInterval(State.signalBlinkInterval);
+                cancelAnimationFrame(State.signalBlinkInterval);
+            }
+        });
+
+        // 添加页面可见性变化监听
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'visible') {
+                // 页面变为可见时，立即更新数据
+                if (State.currentStockCode) {
+                    updateStockData();
+                }
             }
         });
 
@@ -1510,6 +1558,23 @@
             .overflow-y-auto {
                 -webkit-overflow-scrolling: touch;
             }
+            
+            /* 图表响应式高度 */
+            #chart {
+                height: 300px;
+            }
+            
+            @media (min-width: 640px) {
+                #chart {
+                    height: 400px;
+                }
+            }
+            
+            @media (min-width: 768px) {
+                #chart {
+                    height: 500px;
+                }
+            }
         `;
         document.head.appendChild(style);
 
@@ -1612,29 +1677,23 @@
         // 定期更新调试信息
         setInterval(updateDebugInfo, 1000);
 
-        // 监听页面可见性变化
-        document.addEventListener('visibilitychange', () => {
-            updateDebugInfo();
-            if (document.visibilityState === 'visible') {
-                showToast('页面已恢复可见', 'info');
-            } else {
-                showToast('页面已进入后台', 'info');
-            }
-        });
+        // 监听页面可见性变化（合并到之前的监听器中）
 
         // 显示提示消息
         function showToast(message, type = 'info') {
             const toast = document.createElement('div');
             toast.className = `fixed top-4 right-4 px-4 py-2 rounded-lg shadow-lg z-50 animate-fade-in ${
-                type === 'success' ? 'bg-green-100 text-green-800' :
-                type === 'warning' ? 'bg-yellow-100 text-yellow-800' :
-                'bg-blue-100 text-blue-800'
+                type === 'success' ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200' :
+                type === 'warning' ? 'bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200' :
+                type === 'error' ? 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200' :
+                'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200'
             }`;
             toast.innerHTML = `
                 <div class="flex items-center">
                     <i class="fas ${
                         type === 'success' ? 'fa-check-circle' :
                         type === 'warning' ? 'fa-exclamation-circle' :
+                        type === 'error' ? 'fa-times-circle' :
                         'fa-info-circle'
                     } mr-2"></i>
                     <span>${message}</span>
@@ -1952,7 +2011,7 @@
 
                 <!-- 第二行：图表区域 -->
                 <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-3 sm:p-6 animate-fade-in card-hover">
-                    <div id="chart" class="w-full" style="height: 300px; sm:height: 400px; md:height: 500px;"></div>
+                    <div id="chart" class="w-full" style="height: 300px;"></div>
                     <div id="lastUpdate" class="text-right text-sm text-gray-500 mt-2"></div>
                 </div>
             </div>
