@@ -1321,6 +1321,37 @@
             if (!code) return;
 
             if (confirm('确定要删除这条历史记录吗？')) {
+                // 如果删除的是当前正在查看的股票，清理相关状态
+                if (State.currentStockCode === code) {
+                    // 清除所有定时器
+                    cleanupTimers();
+                    
+                    // 清理图表实例
+                    if (State.chart) {
+                        State.chart.dispose();
+                        State.chart = null;
+                    }
+                    
+                    // 清理价格历史
+                    State.priceHistory.clear(code);
+                    
+                    // 清理缓存
+                    const cacheKey = `stock_${code}`;
+                    State.dataCache.cache.delete(cacheKey);
+                    
+                    // 清理提醒条件
+                    State.priceAlerts.delete(code);
+                    
+                    // 重置状态
+                    State.currentStockCode = null;
+                    State.currentPrice = null;
+                    State.currentChange = null;
+                    
+                    // 重置显示
+                    resetDisplay();
+                }
+                
+                // 从本地存储中删除历史记录
                 let history = JSON.parse(localStorage.getItem('stockHistory') || '[]');
                 // 清理无效数据
                 history = history.filter(item => item && item.code && item.name);
