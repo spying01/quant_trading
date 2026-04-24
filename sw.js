@@ -80,14 +80,14 @@ self.addEventListener('sync', event => {
     log(`Background sync event: ${event.tag}`);
     if (event.tag === 'stockUpdate' || event.tag === 'testSync') {
         event.waitUntil(
-            handleStockUpdate()
+            handleStockUpdate(event.tag)
                 .catch(error => handleError(error, 'sync'))
         );
     }
 });
 
 // 处理股票数据更新
-async function handleStockUpdate() {
+async function handleStockUpdate(eventTag) {
     try {
         const clients = await self.clients.matchAll();
         log(`Found ${clients.length} clients`);
@@ -95,7 +95,7 @@ async function handleStockUpdate() {
         // 向每个客户端发送更新消息
         clients.forEach(client => {
             const message = {
-                type: 'STOCK_UPDATE',
+                type: 'stockUpdate',
                 timestamp: Date.now()
             };
             log('Sending update message to client', message);
@@ -103,7 +103,7 @@ async function handleStockUpdate() {
         });
 
         // 如果是测试同步，发送测试通知
-        if (event.tag === 'testSync') {
+        if (eventTag === 'testSync') {
             await self.registration.showNotification('后台同步测试', {
                 body: '后台同步功能正常工作',
                 icon: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%230ea5e9"%3E%3Cpath d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/%3E%3C/svg%3E'
@@ -202,4 +202,4 @@ self.addEventListener('fetch', event => {
 self.addEventListener('message', event => {
     log('Message received from client:', event.data);
     // 可以在这里处理来自客户端的消息
-}); 
+});

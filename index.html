@@ -54,12 +54,102 @@
             ]
         };
 
+        // 缓存管理器
+        class CacheManager {
+          constructor() {
+            this.cache = new Map();
+            this.defaultTTL = 60000; // 默认缓存1分钟
+          }
+          
+          get(key) {
+            const item = this.cache.get(key);
+            if (!item) return null;
+            
+            if (Date.now() - item.timestamp > item.ttl) {
+              this.cache.delete(key);
+              return null;
+            }
+            
+            return item.value;
+          }
+          
+          set(key, value, ttl = this.defaultTTL) {
+            this.cache.set(key, {
+              value,
+              timestamp: Date.now(),
+              ttl
+            });
+          }
+          
+          clear() {
+            this.cache.clear();
+          }
+        }
+
+        // 价格历史管理器
+        class PriceHistoryManager {
+          constructor(maxPoints = 999) {
+            this.history = {};
+            this.maxPoints = maxPoints;
+          }
+          
+          add(code, price) {
+            if (!this.history[code]) {
+              this.history[code] = [];
+            }
+            
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            this.history[code].push({
+              time: timeStr,
+              price: price
+            });
+            
+            // 限制数据点数量
+            if (this.history[code].length > this.maxPoints) {
+              this.history[code] = this.history[code].slice(-this.maxPoints);
+            }
+          }
+          
+          get(code) {
+            return this.history[code] || [];
+          }
+          
+          clear(code) {
+            if (code) {
+              this.history[code] = [];
+            } else {
+              this.history = {};
+            }
+          }
+        }
+
+        // 节流函数
+        function throttle(func, delay) {
+          let lastCall = 0;
+          return function(...args) {
+            const now = Date.now();
+            if (now - lastCall < delay) return;
+            lastCall = now;
+            return func.apply(this, args);
+          };
+        }
+
+        // 防抖函数
+        function debounce(func, delay) {
+          let timeoutId;
+          return function(...args) {
+            clearTimeout(timeoutId);
+            timeoutId = setTimeout(() => func.apply(this, args), delay);
+          };
+        }
+
         // 全局状态管理
         const State = {
             chart: null,                    // ECharts实例
             refreshTimer: null,             // 刷新定时器
             currentStockCode: null,         // 当前股票代码
-            priceHistory: {},              // 价格历史数据，按股票代码存储
+            priceHistory: new PriceHistoryManager(CONFIG.MAX_HISTORY_POINTS), // 价格历史数据，按股票代码存储
             lastAlertTime: 0,              // 上次提醒时间
             titleBlinkInterval: null,       // 标题闪烁定时器
             originalTitle: "股票监控分析",      // 原始标题
@@ -68,7 +158,7 @@
             notificationPermission: false,  // 通知权限状态
             lastPriceCheck: null,          // 上次价格检查时间
             changeBlinkInterval: null,      // 涨跌幅闪烁定时器
-            dataCache: new Map(),          // 数据缓存
+            dataCache: new CacheManager(),  // 数据缓存
             retryCount: 0,                 // 重试计数器
             isLoading: false,              // 加载状态
             errorMessage: null,            // 错误信息
@@ -175,15 +265,13 @@
             document.getElementById('refreshInterval').addEventListener('change', updateRefreshInterval);
 
             // 窗口大小改变时调整图表
-            let resizeTimer;
-            window.addEventListener('resize', function () {
-                clearTimeout(resizeTimer);
-                resizeTimer = setTimeout(function() {
-                    if (State.chart) {
-                        State.chart.resize();
-                    }
-                }, 200);
-            });
+            const debouncedResize = debounce(function() {
+                if (State.chart) {
+                    State.chart.resize();
+                }
+            }, 100);
+
+            window.addEventListener('resize', debouncedResize);
 
 
             // 价格提醒输入框回车事件
@@ -235,12 +323,19 @@
             });
         }
 
-        // 清除所有数据
-        function clearAllData() {
-            // 清除所有定时器
+        // 清理所有定时器
+        function cleanupTimers() {
             if (State.refreshTimer) {
                 clearInterval(State.refreshTimer);
                 State.refreshTimer = null;
+            }
+            if (State.titleBlinkInterval) {
+                clearInterval(State.titleBlinkInterval);
+                State.titleBlinkInterval = null;
+            }
+            if (State.changeBlinkInterval) {
+                clearInterval(State.changeBlinkInterval);
+                State.changeBlinkInterval = null;
             }
             if (State.priceAlertBlinkInterval) {
                 cancelAnimationFrame(State.priceAlertBlinkInterval);
@@ -252,6 +347,12 @@
                 State.signalBlinkInterval = null;
                 State.signalDisplayCount = 0;
             }
+        }
+
+        // 清除所有数据
+        function clearAllData() {
+            // 清除所有定时器
+            cleanupTimers();
             
             // 清除提醒条件
             State.priceAlerts.clear();
@@ -333,43 +434,54 @@
                 throw new Error('请输入6位股票代码');
             }
 
-            try {
-                // 添加股票代码前缀
-                const fullCode = code.startsWith('6') ? `sh${code}` : `sz${code}`;
-                const response = await fetch(`${CONFIG.TENCENT_API_PREFIX}${fullCode}?_=${Date.now()}`);
-
-                if (!response.ok) {
-                    throw new Error('网络请求失败');
-                }
-
-                const buffer = await response.arrayBuffer();
-                // 使用 GBK 解码
-                const text = new TextDecoder('gbk').decode(buffer);
-                const data = parseTencentData(text, fullCode);
-
-                if (!data) {
-                    throw new Error('数据解析失败');
-                }
-
-                // 验证数据有效性
-                if (!validateStockData(data)) {
-                    throw new Error('数据验证失败');
-                }
-
-                return data;
-            } catch (error) {
-                console.error('获取数据失败:', error);
-                // 重试机制
-                if (State.retryCount < CONFIG.RETRY_ATTEMPTS) {
-                    State.retryCount++;
-                    await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY));
-                    return fetchStockData(code);
-                }
-                throw error;
-            } finally {
-                State.retryCount = 0;
+            // 检查缓存
+            const cacheKey = `stock_${code}`;
+            const cachedData = State.dataCache.get(cacheKey);
+            if (cachedData) {
+                return cachedData;
             }
+
+            let lastError;
+            for (let i = 0; i < CONFIG.RETRY_ATTEMPTS; i++) {
+                try {
+                    // 添加股票代码前缀
+                    const fullCode = code.startsWith('6') ? `sh${code}` : `sz${code}`;
+                    const response = await fetch(`${CONFIG.TENCENT_API_PREFIX}${fullCode}?_=${Date.now()}`);
+
+                    if (!response.ok) {
+                        throw new Error('网络请求失败');
+                    }
+
+                    const buffer = await response.arrayBuffer();
+                    // 使用 GBK 解码
+                    const text = new TextDecoder('gbk').decode(buffer);
+                    const data = parseTencentData(text, fullCode);
+
+                    if (!data) {
+                        throw new Error('数据解析失败');
+                    }
+
+                    // 验证数据有效性
+                    if (!validateStockData(data)) {
+                        throw new Error('数据验证失败');
+                    }
+
+                    // 缓存数据
+                    State.dataCache.set(cacheKey, data);
+                    return data;
+                } catch (error) {
+                    console.error(`获取数据失败 (${i+1}/${CONFIG.RETRY_ATTEMPTS}):`, error);
+                    lastError = error;
+                    if (i < CONFIG.RETRY_ATTEMPTS - 1) {
+                        await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY * (i + 1)));
+                    }
+                }
+            }
+            throw lastError;
         }
+
+        // 使用节流包装 fetchStockData
+        const throttledFetchStockData = throttle(fetchStockData, 1000);
 
         // 验证股票数据
         function validateStockData(data) {
@@ -454,26 +566,7 @@
                 // 如果切换了股票，重置所有状态
                 if (State.currentStockCode !== code) {
                     // 清除所有定时器
-                    if (State.refreshTimer) {
-                        clearInterval(State.refreshTimer);
-                        State.refreshTimer = null;
-                    }
-                    if (State.titleBlinkInterval) {
-                        clearInterval(State.titleBlinkInterval);
-                        State.titleBlinkInterval = null;
-                    }
-                    if (State.changeBlinkInterval) {
-                        clearInterval(State.changeBlinkInterval);
-                        State.changeBlinkInterval = null;
-                    }
-                    if (State.priceAlertBlinkInterval) {
-                        cancelAnimationFrame(State.priceAlertBlinkInterval);
-                        State.priceAlertBlinkInterval = null;
-                    }
-                    if (State.signalBlinkInterval) {
-                        cancelAnimationFrame(State.signalBlinkInterval);
-                        State.signalBlinkInterval = null;
-                    }
+                    cleanupTimers();
                     
                     // 重置图表
                     if (State.chart) {
@@ -484,10 +577,10 @@
                     State.currentStockCode = code;
                     
                     // 重置价格历史
-                    State.priceHistory[code] = [];
+                    State.priceHistory.clear(code);
                 }
 
-                const stockData = await fetchStockData(code);
+                const stockData = await throttledFetchStockData(code);
 
                 // 只在手动输入股票代码时添加到历史记录
                 if (document.getElementById('stockCode').value === code) {
@@ -590,7 +683,7 @@
             if (!State.currentStockCode) return;
 
             try {
-                const stockData = await fetchStockData(State.currentStockCode);
+                const stockData = await throttledFetchStockData(State.currentStockCode);
                 if (!stockData) {
                     throw new Error('获取数据失败');
                 }
@@ -634,11 +727,31 @@
                     throw new Error('数据无效');
                 }
 
-                // 更新基本信息
-                document.getElementById('code').textContent = document.getElementById('stockCode').value;
-                document.getElementById('name').textContent = data.name;
-                document.getElementById('price').textContent = data.price.toFixed(2);
+                // 批量更新DOM
+                const elements = {
+                    code: document.getElementById('stockCode').value,
+                    name: data.name,
+                    price: data.price.toFixed(2),
+                    trend: data.trend,
+                    support: data.support,
+                    resistance: data.resistance,
+                    high: data.high.toFixed(2),
+                    low: data.low.toFixed(2),
+                    lastClose: data.lastClose.toFixed(2),
+                    maxGain: ((data.high - data.lastClose) / data.lastClose * 100).toFixed(2) + '%',
+                    maxLoss: ((data.low - data.lastClose) / data.lastClose * 100).toFixed(2) + '%',
+                    volume: formatVolume(data.volume),
+                    amount: formatAmount(data.amount),
+                    turnover: data.turnover + '%'
+                };
                 
+                Object.entries(elements).forEach(([id, value]) => {
+                    const element = document.getElementById(id);
+                    if (element) {
+                        element.textContent = value;
+                    }
+                });
+
                 // 更新价格提醒输入框的默认值
                 document.getElementById('alertValue').value = data.price.toFixed(2);
                 
@@ -662,21 +775,6 @@
                 } else if (changeValue < 0) {
                     changeElement.classList.add('price-down', 'blink');
                 }
-
-                // 更新其他基本信息
-                document.getElementById('trend').textContent = data.trend;
-                document.getElementById('support').textContent = data.support;
-                document.getElementById('resistance').textContent = data.resistance;
-                document.getElementById('high').textContent = data.high.toFixed(2);
-                document.getElementById('low').textContent = data.low.toFixed(2);
-                document.getElementById('lastClose').textContent = data.lastClose.toFixed(2);
-                document.getElementById('maxGain').textContent = ((data.high - data.lastClose) / data.lastClose * 100).toFixed(2) + '%';
-                document.getElementById('maxLoss').textContent = ((data.low - data.lastClose) / data.lastClose * 100).toFixed(2) + '%';
-
-                // 更新交易量信息
-                document.getElementById('volume').textContent = formatVolume(data.volume);
-                document.getElementById('amount').textContent = formatAmount(data.amount);
-                document.getElementById('turnover').textContent = data.turnover + '%';
 
                 // 更新当前价格和涨跌幅
                 State.currentPrice = data.price;
@@ -705,127 +803,129 @@
         function updateChart(data) {
             if (!State.chart) {
                 State.chart = echarts.init(document.getElementById('chart'));
-            }
-
-            // 确保当前股票的价格历史数组存在
-            if (!State.priceHistory[State.currentStockCode]) {
-                State.priceHistory[State.currentStockCode] = [];
+                
+                // 初始化图表配置
+                const initialOption = {
+                    title: {
+                        text: `${data.name} (${document.getElementById('stockCode').value}) 价格走势`,
+                        left: 'center',
+                        top: 10,
+                        textStyle: {
+                            fontSize: 16,
+                            fontWeight: 'normal'
+                        }
+                    },
+                    tooltip: {
+                        trigger: 'axis',
+                        axisPointer: {
+                            type: 'cross',
+                            label: {
+                                backgroundColor: '#6a7985'
+                            }
+                        },
+                        formatter: function (params) {
+                            let result = params[0].axisValue + '<br/>';
+                            params.forEach(param => {
+                                result += `${param.seriesName}: ${param.value.toFixed(2)}<br/>`;
+                            });
+                            return result;
+                        }
+                    },
+                    legend: {
+                        data: ['实时价格'],
+                        bottom: 0,
+                        padding: [0, 0, 10, 0]
+                    },
+                    grid: {
+                        left: '3%',
+                        right: '4%',
+                        bottom: '10%',
+                        top: '15%',
+                        containLabel: true
+                    },
+                    toolbox: {
+                        feature: {
+                            saveAsImage: {
+                                title: '保存图片'
+                            }
+                        },
+                        right: 10,
+                        top: 10
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: [],
+                        axisLabel: {
+                            rotate: 45,
+                            interval: 'auto',
+                            formatter: function(value) {
+                                return value;
+                            }
+                        }
+                    },
+                    yAxis: {
+                        type: 'value',
+                        scale: true,
+                        splitLine: {
+                            show: true,
+                            lineStyle: {
+                                type: 'dashed',
+                                color: '#E5E7EB'
+                            }
+                        },
+                        axisLabel: {
+                            formatter: function(value) {
+                                return value.toFixed(2);
+                            }
+                        }
+                    },
+                    series: [
+                        {
+                            name: '实时价格',
+                            type: 'line',
+                            data: [],
+                            smooth: true,
+                            symbol: 'none',
+                            lineStyle: {
+                                width: 2,
+                                color: '#0EA5E9'
+                            },
+                            areaStyle: {
+                                opacity: 0.1,
+                                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{
+                                    offset: 0,
+                                    color: '#0EA5E9'
+                                }, {
+                                    offset: 1,
+                                    color: 'rgba(14, 165, 233, 0.1)'
+                                }])
+                            }
+                        }
+                    ]
+                };
+                
+                State.chart.setOption(initialOption);
             }
 
             // 更新历史数据
-            const now = new Date();
-            const timeStr = now.toLocaleTimeString();
-            State.priceHistory[State.currentStockCode].push({
-                time: timeStr,
-                price: data.price
-            });
+            State.priceHistory.add(State.currentStockCode, data.price);
 
-            // 限制历史数据点数
-            if (State.priceHistory[State.currentStockCode].length > CONFIG.MAX_HISTORY_POINTS) {
-                State.priceHistory[State.currentStockCode] = 
-                    State.priceHistory[State.currentStockCode].slice(-CONFIG.MAX_HISTORY_POINTS);
-            }
+            // 只更新数据部分，避免重建整个配置
+            const priceHistory = State.priceHistory.get(State.currentStockCode);
+            const prices = priceHistory.map(item => item.price);
+            const times = priceHistory.map(item => item.time);
 
-            const option = {
+            State.chart.setOption({
                 title: {
-                    text: `${data.name} (${document.getElementById('stockCode').value}) 价格走势`,
-                    left: 'center',
-                    top: 10,
-                    textStyle: {
-                        fontSize: 16,
-                        fontWeight: 'normal'
-                    }
-                },
-                tooltip: {
-                    trigger: 'axis',
-                    axisPointer: {
-                        type: 'cross',
-                        label: {
-                            backgroundColor: '#6a7985'
-                        }
-                    },
-                    formatter: function (params) {
-                        let result = params[0].axisValue + '<br/>';
-                        params.forEach(param => {
-                            result += `${param.seriesName}: ${param.value.toFixed(2)}<br/>`;
-                        });
-                        return result;
-                    }
-                },
-                legend: {
-                    data: ['实时价格'],
-                    bottom: 0,
-                    padding: [0, 0, 10, 0]
-                },
-                grid: {
-                    left: '3%',
-                    right: '4%',
-                    bottom: '10%',
-                    top: '15%',
-                    containLabel: true
-                },
-                toolbox: {
-                    feature: {
-                        saveAsImage: {
-                            title: '保存图片'
-                        }
-                    },
-                    right: 10,
-                    top: 10
+                    text: `${data.name} (${document.getElementById('stockCode').value}) 价格走势`
                 },
                 xAxis: {
-                    type: 'category',
-                    data: State.priceHistory[State.currentStockCode].map(item => item.time),
-                    axisLabel: {
-                        rotate: 45,
-                        interval: 'auto',
-                        formatter: function(value) {
-                            return value;
-                        }
-                    }
+                    data: times
                 },
-                yAxis: {
-                    type: 'value',
-                    scale: true,
-                    splitLine: {
-                        show: true,
-                        lineStyle: {
-                            type: 'dashed',
-                            color: '#E5E7EB'
-                        }
-                    },
-                    axisLabel: {
-                        formatter: function(value) {
-                            return value.toFixed(2);
-                        }
-                    }
-                },
-                series: [
-                    {
-                        name: '实时价格',
-                        type: 'line',
-                        data: State.priceHistory[State.currentStockCode].map(item => item.price),
-                        smooth: true,
-                        symbol: 'none',
-                        lineStyle: {
-                            width: 2,
-                            color: '#0EA5E9'
-                        },
-                        areaStyle: {
-                            opacity: 0.1,
-                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{
-                                offset: 0,
-                                color: '#0EA5E9'
-                            }, {
-                                offset: 1,
-                                color: 'rgba(14, 165, 233, 0.1)'
-                            }])
-                        }
-                    }
-                ]
-            };
-
-            State.chart.setOption(option);
+                series: [{
+                    data: prices
+                }]
+            }, false); // 禁用重绘动画，提高性能
         }
 
         // 更新最后更新时间
@@ -1379,23 +1479,7 @@
 
 
         // 在页面关闭时清理所有定时器
-        window.addEventListener('beforeunload', function() {
-            if (State.refreshTimer) {
-                clearInterval(State.refreshTimer);
-            }
-            if (State.titleBlinkInterval) {
-                clearInterval(State.titleBlinkInterval);
-            }
-            if (State.changeBlinkInterval) {
-                clearInterval(State.changeBlinkInterval);
-            }
-            if (State.priceAlertBlinkInterval) {
-                cancelAnimationFrame(State.priceAlertBlinkInterval);
-            }
-            if (State.signalBlinkInterval) {
-                cancelAnimationFrame(State.signalBlinkInterval);
-            }
-        });
+        window.addEventListener('beforeunload', cleanupTimers);
 
         // 添加页面可见性变化监听
         document.addEventListener('visibilitychange', function() {
