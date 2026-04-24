@@ -93,21 +93,29 @@ async function handleStockUpdate(eventTag) {
         log(`Found ${clients.length} clients`);
         
         // 向每个客户端发送更新消息
-        clients.forEach(client => {
-            const message = {
-                type: 'stockUpdate',
-                timestamp: Date.now()
-            };
-            log('Sending update message to client', message);
-            client.postMessage(message);
-        });
+        for (const client of clients) {
+            try {
+                const message = {
+                    type: 'stockUpdate',
+                    timestamp: Date.now()
+                };
+                log('Sending update message to client', message);
+                client.postMessage(message);
+            } catch (clientError) {
+                log('Error sending message to client:', clientError);
+            }
+        }
 
         // 如果是测试同步，发送测试通知
         if (eventTag === 'testSync') {
-            await self.registration.showNotification('后台同步测试', {
-                body: '后台同步功能正常工作',
-                icon: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%230ea5e9"%3E%3Cpath d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/%3E%3C/svg%3E'
-            });
+            try {
+                await self.registration.showNotification('后台同步测试', {
+                    body: '后台同步功能正常工作',
+                    icon: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%230ea5e9"%3E%3Cpath d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/%3E%3C/svg%3E'
+                });
+            } catch (notificationError) {
+                log('Error showing notification:', notificationError);
+            }
         }
     } catch (error) {
         handleError(error, 'handleStockUpdate');

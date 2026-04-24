@@ -263,6 +263,8 @@
             stockCodeInput.addEventListener('keypress', function (e) {
                 if (e.key === 'Enter' && this.value.length === 6) {
                     e.preventDefault();
+                    // 在用户交互时请求通知权限
+                    requestNotificationPermission();
                     searchStock();
                 }
             });
@@ -521,7 +523,7 @@
             throw lastError;
         }
 
-        // 使用节流包装 fetchStockData
+        // 使用节流包装 fetchStockData - 但在搜索股票时不使用，避免用户输入后获取失败
         const throttledFetchStockData = throttle(fetchStockData, 1000);
 
         // 验证股票数据
@@ -628,15 +630,23 @@
                     State.currentStockCode = code;
                 }
 
-                const stockData = await throttledFetchStockData(code);
+                // 直接调用 fetchStockData 而不是 throttledFetchStockData，确保立即获取数据
+                const stockData = await fetchStockData(code);
 
                 // 只在手动输入股票代码时添加到历史记录
                 if (document.getElementById('stockCode').value === code) {
                     addToHistory(code, stockData.name);
                 }
 
-                // 更新股票数据
-                await updateStockData();
+                // 直接更新股票信息，而不是调用 updateStockData() 再次请求数据
+                updateStockInfo(stockData);
+                updateChart(stockData);
+                updateLastUpdateTime();
+                updateTitle();
+                checkPriceAlerts(stockData);
+                checkPriceSpeed(stockData);
+                updateSignalDisplay(stockData);
+                updateDebugInfo();
                 
                 // 设置默认刷新间隔为5秒
                 document.getElementById('refreshInterval').value = '5';
@@ -683,13 +693,11 @@
 
             const interval = parseInt(document.getElementById('refreshInterval').value);
             if (interval > 0 && State.currentStockCode) {
-                // 立即执行一次更新
-                updateStockData();
-                
                 // 设置新的定时器
                 State.refreshTimer = setInterval(async () => {
                     try {
-                        const stockData = await fetchStockData(State.currentStockCode);
+                        // 使用 throttledFetchStockData 来减少频繁的网络请求
+                        const stockData = await throttledFetchStockData(State.currentStockCode);
                         if (stockData) {
                             // 更新股票信息
                             updateStockInfo(stockData);
@@ -731,7 +739,8 @@
             if (!State.currentStockCode) return;
 
             try {
-                const stockData = await throttledFetchStockData(State.currentStockCode);
+                // 使用 fetchStockData 而不是 throttledFetchStockData，确保能获取到最新数据
+                const stockData = await fetchStockData(State.currentStockCode);
                 if (!stockData) {
                     throw new Error('获取数据失败');
                 }
@@ -849,15 +858,24 @@
 
         // 图表配置缓存
         let chartConfigCache = null;
+        let currentChartStockCode = null;
 
         // 更新图表
         function updateChart(data) {
-            if (!State.chart) {
-                // 销毁可能存在的旧图表实例
+            // 检查是否切换了股票
+            if (currentChartStockCode !== State.currentStockCode) {
+                // 重置图表配置缓存
+                chartConfigCache = null;
+                currentChartStockCode = State.currentStockCode;
+                
+                // 销毁旧图表实例
                 if (State.chart) {
                     State.chart.dispose();
+                    State.chart = null;
                 }
-                
+            }
+            
+            if (!State.chart) {
                 State.chart = echarts.init(document.getElementById('chart'));
                 
                 // 初始化图表配置
@@ -1399,15 +1417,15 @@
         function resetPriceAlert() {
             // 清除所有提醒条件
             State.priceAlerts.clear();
-            // 清除价格提醒状态（使用 cancelAnimationFrame）
+            // 清除价格提醒状态（使用 clearInterval）
             if (State.priceAlertBlinkInterval) {
-                cancelAnimationFrame(State.priceAlertBlinkInterval);
+                clearInterval(State.priceAlertBlinkInterval);
                 State.priceAlertBlinkInterval = null;
                 State.priceAlertDisplayCount = 0;
             }
-            // 清除信号提醒状态（使用 cancelAnimationFrame）
+            // 清除信号提醒状态（使用 clearInterval）
             if (State.signalBlinkInterval) {
-                cancelAnimationFrame(State.signalBlinkInterval);
+                clearInterval(State.signalBlinkInterval);
                 State.signalBlinkInterval = null;
                 State.signalDisplayCount = 0;
             }
@@ -1510,9 +1528,9 @@
 
         // 检查涨速并触发买卖信号
         function checkPriceSpeed(data) {
-            if (!State.currentStockCode || !State.priceHistory[State.currentStockCode]) return;
+            if (!State.currentStockCode) return;
             
-            const priceHistory = State.priceHistory[State.currentStockCode];
+            const priceHistory = State.priceHistory.get(State.currentStockCode);
             if (priceHistory.length < 2) return;
 
             const now = Date.now();
