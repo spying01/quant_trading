@@ -59,6 +59,8 @@
           constructor() {
             this.cache = new Map();
             this.defaultTTL = 60000; // 默认缓存1分钟
+            this.maxSize = 100; // 最大缓存数量
+            this.cleanupInterval = setInterval(() => this.cleanup(), 5 * 60 * 1000); // 每5分钟清理一次
           }
           
           get(key) {
@@ -74,6 +76,12 @@
           }
           
           set(key, value, ttl = this.defaultTTL) {
+            // 如果缓存大小超过限制，删除最旧的项目
+            if (this.cache.size >= this.maxSize) {
+              const oldestKey = this.cache.keys().next().value;
+              this.cache.delete(oldestKey);
+            }
+            
             this.cache.set(key, {
               value,
               timestamp: Date.now(),
@@ -84,42 +92,68 @@
           clear() {
             this.cache.clear();
           }
+          
+          // 清理过期数据
+          cleanup() {
+            const now = Date.now();
+            for (const [key, item] of this.cache.entries()) {
+              if (now - item.timestamp > item.ttl) {
+                this.cache.delete(key);
+              }
+            }
+          }
+          
+          // 销毁缓存管理器
+          destroy() {
+            clearInterval(this.cleanupInterval);
+            this.clear();
+          }
         }
 
         // 价格历史管理器
         class PriceHistoryManager {
           constructor(maxPoints = 999) {
-            this.history = {};
+            this.history = new Map();
             this.maxPoints = maxPoints;
           }
           
           add(code, price) {
-            if (!this.history[code]) {
-              this.history[code] = [];
+            if (!this.history.has(code)) {
+              this.history.set(code, []);
             }
             
             const now = new Date();
             const timeStr = now.toLocaleTimeString();
-            this.history[code].push({
+            const history = this.history.get(code);
+            history.push({
               time: timeStr,
               price: price
             });
             
             // 限制数据点数量
-            if (this.history[code].length > this.maxPoints) {
-              this.history[code] = this.history[code].slice(-this.maxPoints);
+            if (history.length > this.maxPoints) {
+              this.history.set(code, history.slice(-this.maxPoints));
             }
           }
           
           get(code) {
-            return this.history[code] || [];
+            return this.history.get(code) || [];
           }
           
           clear(code) {
             if (code) {
-              this.history[code] = [];
+              this.history.set(code, []);
             } else {
-              this.history = {};
+              this.history.clear();
+            }
+          }
+          
+          // 清理不再使用的历史数据
+          cleanup() {
+            for (const [code, history] of this.history.entries()) {
+              if (history.length === 0) {
+                this.history.delete(code);
+              }
             }
           }
         }
@@ -365,8 +399,15 @@
             
             // 清除图表
             if (State.chart) {
-                State.chart.clear();
+                State.chart.dispose();
+                State.chart = null;
             }
+            
+            // 清理价格历史
+            State.priceHistory.cleanup();
+            
+            // 清理缓存
+            State.dataCache.cleanup();
             
             // 重置显示
             resetDisplay();
@@ -570,14 +611,21 @@
                     
                     // 重置图表
                     if (State.chart) {
-                        State.chart.clear();
+                        State.chart.dispose();
+                        State.chart = null;
                     }
+                    
+                    // 清理之前股票的价格历史
+                    if (State.currentStockCode) {
+                        State.priceHistory.clear(State.currentStockCode);
+                    }
+                    
+                    // 清理之前股票的缓存
+                    const oldCacheKey = `stock_${State.currentStockCode}`;
+                    State.dataCache.cache.delete(oldCacheKey);
                     
                     // 更新当前股票代码
                     State.currentStockCode = code;
-                    
-                    // 重置价格历史
-                    State.priceHistory.clear(code);
                 }
 
                 const stockData = await throttledFetchStockData(code);
@@ -799,13 +847,21 @@
             }
         }
 
+        // 图表配置缓存
+        let chartConfigCache = null;
+
         // 更新图表
         function updateChart(data) {
             if (!State.chart) {
+                // 销毁可能存在的旧图表实例
+                if (State.chart) {
+                    State.chart.dispose();
+                }
+                
                 State.chart = echarts.init(document.getElementById('chart'));
                 
                 // 初始化图表配置
-                const initialOption = {
+                chartConfigCache = {
                     title: {
                         text: `${data.name} (${document.getElementById('stockCode').value}) 价格走势`,
                         left: 'center',
@@ -904,7 +960,7 @@
                     ]
                 };
                 
-                State.chart.setOption(initialOption);
+                State.chart.setOption(chartConfigCache);
             }
 
             // 更新历史数据
@@ -915,17 +971,12 @@
             const prices = priceHistory.map(item => item.price);
             const times = priceHistory.map(item => item.time);
 
-            State.chart.setOption({
-                title: {
-                    text: `${data.name} (${document.getElementById('stockCode').value}) 价格走势`
-                },
-                xAxis: {
-                    data: times
-                },
-                series: [{
-                    data: prices
-                }]
-            }, false); // 禁用重绘动画，提高性能
+            // 复用配置对象，只更新必要的部分
+            chartConfigCache.title.text = `${data.name} (${document.getElementById('stockCode').value}) 价格走势`;
+            chartConfigCache.xAxis.data = times;
+            chartConfigCache.series[0].data = prices;
+
+            State.chart.setOption(chartConfigCache, false); // 禁用重绘动画，提高性能
         }
 
         // 更新最后更新时间
@@ -1478,8 +1529,26 @@
         }
 
 
-        // 在页面关闭时清理所有定时器
-        window.addEventListener('beforeunload', cleanupTimers);
+        // 在页面关闭时清理所有资源
+        window.addEventListener('beforeunload', function() {
+            // 清理所有定时器
+            cleanupTimers();
+            
+            // 清理图表实例
+            if (State.chart) {
+                State.chart.dispose();
+                State.chart = null;
+            }
+            
+            // 清理缓存管理器
+            State.dataCache.destroy();
+            
+            // 清理价格历史
+            State.priceHistory.clear();
+            
+            // 清理提醒条件
+            State.priceAlerts.clear();
+        });
 
         // 添加页面可见性变化监听
         document.addEventListener('visibilitychange', function() {
