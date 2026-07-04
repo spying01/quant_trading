@@ -210,6 +210,7 @@
             serviceWorkerRegistration: null,    // Service Worker 注册实例
             backgroundSyncSupported: false,     // 后台同步支持状态
             permissionStatus: null,             // 权限状态
+            worker: null,                       // Web Worker 实例
         };
 
         // DOM加载完成后初始化
@@ -222,6 +223,7 @@
             initAlertSound();      // 初始化提醒音效
             await initServiceWorker(); // 初始化 Service Worker
             await checkAndRequestPermissions(); // 检查并请求权限
+            initWorker();          // 初始化 Web Worker
             document.title = State.originalTitle;
         });
 
@@ -382,6 +384,13 @@
                 cancelAnimationFrame(State.signalBlinkInterval);
                 State.signalBlinkInterval = null;
                 State.signalDisplayCount = 0;
+            }
+            
+            // 停止 Worker 刷新
+            if (State.worker) {
+                State.worker.postMessage({
+                    type: 'stopRefresh'
+                });
             }
         }
 
@@ -628,6 +637,14 @@
                     
                     // 更新当前股票代码
                     State.currentStockCode = code;
+                    
+                    // 通知 Worker 更新股票代码
+                    if (State.worker) {
+                        State.worker.postMessage({
+                            type: 'updateCode',
+                            code: code
+                        });
+                    }
                 }
 
                 // 直接调用 fetchStockData 而不是 throttledFetchStockData，确保立即获取数据
@@ -693,31 +710,40 @@
 
             const interval = parseInt(document.getElementById('refreshInterval').value);
             if (interval > 0 && State.currentStockCode) {
-                // 设置新的定时器
-                State.refreshTimer = setInterval(async () => {
-                    try {
-                        // 使用 throttledFetchStockData 来减少频繁的网络请求
-                        const stockData = await throttledFetchStockData(State.currentStockCode);
-                        if (stockData) {
-                            // 更新股票信息
-                            updateStockInfo(stockData);
-                            // 更新图表
-                            updateChart(stockData);
-                            // 更新最后更新时间
-                            updateLastUpdateTime();
-                            // 更新标题
-                            updateTitle();
-                            // 检查价格提醒
-                            checkPriceAlerts(stockData);
-                            // 检查涨速
-                            checkPriceSpeed(stockData);
-                            // 更新信号显示
-                            updateSignalDisplay(stockData);
+                // 如果支持 Web Worker，使用 Worker 进行后台刷新
+                if (State.worker) {
+                    State.worker.postMessage({
+                        type: 'startRefresh',
+                        code: State.currentStockCode,
+                        interval: interval
+                    });
+                } else {
+                    // 否则使用传统的 setInterval
+                    State.refreshTimer = setInterval(async () => {
+                        try {
+                            // 使用 throttledFetchStockData 来减少频繁的网络请求
+                            const stockData = await throttledFetchStockData(State.currentStockCode);
+                            if (stockData) {
+                                // 更新股票信息
+                                updateStockInfo(stockData);
+                                // 更新图表
+                                updateChart(stockData);
+                                // 更新最后更新时间
+                                updateLastUpdateTime();
+                                // 更新标题
+                                updateTitle();
+                                // 检查价格提醒
+                                checkPriceAlerts(stockData);
+                                // 检查涨速
+                                checkPriceSpeed(stockData);
+                                // 更新信号显示
+                                updateSignalDisplay(stockData);
+                            }
+                        } catch (error) {
+                            console.error('定时更新失败:', error);
                         }
-                    } catch (error) {
-                        console.error('定时更新失败:', error);
-                    }
-                }, interval * 1000);
+                    }, interval * 1000);
+                }
 
                 // 如果支持后台同步，注册后台同步任务
                 if (State.backgroundSyncSupported && State.serviceWorkerRegistration) {
@@ -1244,8 +1270,8 @@
                     // 每3秒播放一次提示音
                     playAlertSound();
 
-                    // 如果提醒次数达到60次（3分钟），停止提醒
-                    if (State[countKey] >= 60) {
+                    // 提醒持续3秒后停止（1次切换 = 3秒）
+                    if (State[countKey] >= 1) {
                         cancelAnimationFrame(State[intervalKey]);
                         State[intervalKey] = null;
                         document.title = State.currentPrice && State.currentChange ? 
@@ -1608,6 +1634,27 @@
                 }
             }
         });
+
+        // 初始化 Web Worker
+        function initWorker() {
+            if ('Worker' in window) {
+                State.worker = new Worker('worker.js');
+                
+                // 监听 Worker 消息
+                State.worker.addEventListener('message', async (event) => {
+                    const { type, code } = event.data;
+                    
+                    if (type === 'refreshData' && code === State.currentStockCode) {
+                        // 收到 Worker 的刷新请求，更新数据
+                        await updateStockData();
+                    }
+                });
+                
+                console.log('Web Worker 初始化成功');
+            } else {
+                console.warn('浏览器不支持 Web Worker');
+            }
+        }
 
         // 初始化 Service Worker
         async function initServiceWorker() {
